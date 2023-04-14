@@ -6,7 +6,7 @@
 <setting alwaysvectorfont="no"/>
 <setting verticaltext="up"/>
 </settings>
-<grid distance="0.1" unitdist="inch" unit="inch" style="lines" multiple="1" display="no" altdistance="0.01" altunitdist="inch" altunit="inch"/>
+<grid distance="0.05" unitdist="inch" unit="inch" style="lines" multiple="1" display="no" altdistance="0.01" altunitdist="inch" altunit="inch"/>
 <layers>
 <layer number="1" name="Top" color="4" fill="1" visible="no" active="no"/>
 <layer number="2" name="Route2" color="1" fill="3" visible="no" active="no"/>
@@ -23594,8 +23594,8 @@ CONN_04
 <description>AMASS XT30UPB male type connector</description>
 <text x="-3.5" y="-5" size="1.778" layer="25">&gt;NAME</text>
 <text x="-4.5" y="3" size="1.778" layer="27">&gt;VALUE</text>
-<pad name="-" x="-2.5" y="0" drill="1.8"/>
-<pad name="+" x="2.5" y="0" drill="1.8"/>
+<pad name="-" x="-2.5" y="0" drill="2.6"/>
+<pad name="+" x="2.5" y="0" drill="2.6"/>
 <wire x1="-5.1" y1="0.6" x2="-5.1" y2="-0.6" width="0.127" layer="21"/>
 <wire x1="-5.1" y1="-0.6" x2="-3.1" y2="-2.6" width="0.127" layer="21" curve="90"/>
 <wire x1="-3.1" y1="-2.6" x2="5.1" y2="-2.6" width="0.127" layer="21"/>
@@ -28683,6 +28683,16 @@ OSHW_LOGO</description>
 <wire x1="5.08" y1="73.66" x2="5.08" y2="88.9" width="0.1524" layer="91"/>
 <label x="5.08" y="83.82" size="1.778" layer="95"/>
 </segment>
+<segment>
+<pinref part="IC3" gate="G$1" pin="GND_1"/>
+<wire x1="297.18" y1="43.18" x2="297.18" y2="40.64" width="0.1524" layer="91"/>
+<pinref part="IC3" gate="G$1" pin="GND_2"/>
+<wire x1="297.18" y1="40.64" x2="297.18" y2="30.48" width="0.1524" layer="91"/>
+<wire x1="299.72" y1="43.18" x2="299.72" y2="40.64" width="0.1524" layer="91"/>
+<wire x1="299.72" y1="40.64" x2="297.18" y2="40.64" width="0.1524" layer="91"/>
+<junction x="297.18" y="40.64"/>
+<label x="297.18" y="35.56" size="1.778" layer="95"/>
+</segment>
 </net>
 <net name="QSPI_SD0" class="0">
 <segment>
@@ -28794,6 +28804,11 @@ OSHW_LOGO</description>
 <wire x1="281.94" y1="91.44" x2="274.32" y2="91.44" width="0.1524" layer="91"/>
 <wire x1="274.32" y1="91.44" x2="274.32" y2="111.76" width="0.1524" layer="91"/>
 <wire x1="274.32" y1="111.76" x2="297.18" y2="111.76" width="0.1524" layer="91"/>
+<pinref part="IC3" gate="G$1" pin="RESET#"/>
+<wire x1="281.94" y1="78.74" x2="266.7" y2="78.74" width="0.1524" layer="91"/>
+<wire x1="266.7" y1="78.74" x2="266.7" y2="91.44" width="0.1524" layer="91"/>
+<wire x1="266.7" y1="91.44" x2="274.32" y2="91.44" width="0.1524" layer="91"/>
+<junction x="274.32" y="91.44"/>
 </segment>
 <segment>
 <pinref part="HM1" gate="G$1" pin="CSB"/>
@@ -28829,6 +28844,11 @@ OSHW_LOGO</description>
 <pinref part="LED1" gate="G$1" pin="ANODE"/>
 <wire x1="354.33" y1="-85.09" x2="378.46" y2="-85.09" width="0.1524" layer="91"/>
 <label x="370.84" y="-85.09" size="1.778" layer="95"/>
+</segment>
+<segment>
+<pinref part="J2" gate="G$1" pin="3"/>
+<wire x1="208.28" y1="-57.15" x2="233.68" y2="-57.15" width="0.1524" layer="91"/>
+<label x="213.36" y="-57.15" size="1.778" layer="95"/>
 </segment>
 </net>
 <net name="SCK" class="0">
@@ -28921,11 +28941,6 @@ OSHW_LOGO</description>
 <pinref part="SERVO1" gate="J$1" pin="2"/>
 <wire x1="156.21" y1="-57.15" x2="177.8" y2="-57.15" width="0.1524" layer="91"/>
 <label x="161.29" y="-57.15" size="1.778" layer="95"/>
-</segment>
-<segment>
-<pinref part="J2" gate="G$1" pin="3"/>
-<wire x1="208.28" y1="-57.15" x2="233.68" y2="-57.15" width="0.1524" layer="91"/>
-<label x="213.36" y="-57.15" size="1.778" layer="95"/>
 </segment>
 </net>
 <net name="USBD+" class="0">
@@ -29098,17 +29113,6 @@ OSHW_LOGO</description>
 <junction x="257.81" y="154.94"/>
 <pinref part="ESP_PROG" gate="G$1" pin="NO_2"/>
 <wire x1="257.81" y1="182.88" x2="261.62" y2="182.88" width="0.1524" layer="91"/>
-</segment>
-</net>
-<net name="N$12" class="0">
-<segment>
-<pinref part="IC3" gate="G$1" pin="GND_1"/>
-<wire x1="297.18" y1="43.18" x2="297.18" y2="40.64" width="0.1524" layer="91"/>
-<pinref part="IC3" gate="G$1" pin="GND_2"/>
-<wire x1="297.18" y1="40.64" x2="297.18" y2="30.48" width="0.1524" layer="91"/>
-<wire x1="299.72" y1="43.18" x2="299.72" y2="40.64" width="0.1524" layer="91"/>
-<wire x1="299.72" y1="40.64" x2="297.18" y2="40.64" width="0.1524" layer="91"/>
-<junction x="297.18" y="40.64"/>
 </segment>
 </net>
 <net name="N$13" class="0">
@@ -29359,9 +29363,9 @@ OSHW_LOGO</description>
 <label x="243.84" y="73.66" size="1.778" layer="95"/>
 </segment>
 <segment>
-<pinref part="U1" gate="U1" pin="GPIO25"/>
-<wire x1="60.96" y1="17.78" x2="82.55" y2="17.78" width="0.1524" layer="91"/>
-<label x="64.77" y="17.78" size="1.778" layer="95"/>
+<pinref part="U1" gate="U1" pin="GPIO21"/>
+<wire x1="60.96" y1="27.94" x2="82.55" y2="27.94" width="0.1524" layer="91"/>
+<label x="64.77" y="27.94" size="1.778" layer="95"/>
 </segment>
 </net>
 <net name="BUZ" class="0">
