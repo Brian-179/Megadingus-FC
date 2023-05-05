@@ -1,52 +1,31 @@
 #include <SPI.h>
-
-int espcs;
+#include <SoftwareSerial.h>
+#include "Arduino.h"
+#include "Aflightlibs.h"
+#ifndef telem_h
+#define telem_h
 
 class SPITelem {
   public:
     //SPITelem(void);
-    SPITelem(int espcs) {
-      //      SPI.setRX(4);
-      //      SPI.setTX(3);
-      //      SPI.setSCK(2);
-//      if (!SPI.begin){
-//        SPI.begin();
-//      }
-      pinMode(espcs, OUTPUT);
-      digitalWrite(espcs, HIGH);
-    }
-    //    void begin(int espcs) {
-    //      SPI.setRX(4);
-    //      SPI.setTX(3);
-    //      SPI.setSCK(2);
-    //      SPI.begin();
-    //      pinMode(espcs, OUTPUT);
-    //      digitalWrite(espcs, HIGH);
-    //    }
-    void send(int input) {
-      digitalWrite(espcs, LOW);
-      for (int i = 0; i < sizeof(input); i++) {
-        SPI.transfer(input);
-      }
-      digitalWrite(espcs, HIGH);
-    }
-    //    void send() {
-    //      digitalWrite(_SPITelemCS, LOW);
-    //      SPI.transfer(1);
-    //      SPI.transfer(currMillis);
-    //      SPI.transfer(runMode);
-    //      SPI.transfer(anglex);
-    //      SPI.transfer(angley);
-    //      SPI.transfer(anglez);
-    //      SPI.transfer(servoanglex - centrepoint);
-    //      SPI.transfer(servoanglez - centrepoint);
-    //      SPI.transfer(Alt);
-    //      SPI.transfer(smoothedalt);
-    //      SPI.transfer(vSpeed);
-    //      SPI.transfer(Vin);
-    //      SPI.transfer(ax);
-    //      SPI.transfer(ay);
-    //      SPI.transfer(az);
-    //      digitalWrite(_SPITelemCS, HIGH);
-    //    }
+    SPITelem(int espcs);
+    void send(String input);
+    void send(float input);
+    void send(Telem input);
+    String receive();
+    String read();
+  private:
 };
+
+class SoftwareSerialOneWire{
+  public:
+    SoftwareSerialOneWire(int serialpin, int Baud);
+    boolean available();
+    void println(String sinput);
+    String read();
+    String waitRead();
+    String waitRead(int timeLimit);
+  private:
+};
+
+#endif

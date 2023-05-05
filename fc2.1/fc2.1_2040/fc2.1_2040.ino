@@ -18,22 +18,57 @@
 
 //4096B = ~34s of altitude datalogging.
 
+//TODO: low pass filter for gyro (maybe accel) typedef struct for telemetry, computing servoangles in loop(), new AHRS system, cleaning up code, redo datalogging system, config via sd card and usb serial, fix reading vin
+//The SD library in the rp2040 thing can conflict with the adafruit fork of SdFat, thus causing a failure to compile.
+
+#include "SD.h"
+#include <SoftwareSerial.h>
+#include "telem.h"
+
+//SPITelem ESP(8);
+//SoftwareSerialOneWire ESPSerial(8, 38400);
+
+SoftwareSerial ESPSerial(7, 8);
+
+const boolean useProp = false;
+const boolean groundTest = false; //static holddown test
+
+const boolean copyToSD = false; //copy datalog from internal QSPI flash to MicroSD card oncce landed
+const boolean copyToFlash = false; //copy datalog from microSD card to internal QSPI flash once landed
+
+const boolean logToFlash = false; //datalogging to internal QSPI flash. Can cause spikes of latency in both cores; LittleFS halts both cores to write to flash. Logging to other SPI flash is work in progress, that will hopefully solve this issue.
+const boolean logToSD = true; //datalogging to MicroSD card.
+
 const float imuGain = 0.01; //imu fusion thing
 
-const double defaultP = 1.00;
+const double defaultP = 4.00;
 const double defaultI = 0.1;
-const double defaultD = 0.00;
+const double defaultD = 0.10;
 
 const float defaultDelay = 3.00;
 
 const float referencePressure = 1017.0;// hPa local QFF (official meteor-station reading)
 const float outdoorTemp = 25; // °C  measured local outdoor temp.
 const float barometerAltitude = 307.0;  // meters ... map readings + barometer position, mullaley NSW is 307m
+
+const float pyroTime = 250; //pyro channel on time (ms)
+
+float centrepointX = 65; //servo centrepoint,usually 90 (adjust for your own setup)
+float centrepointY = 95;
+
+float servoLimit = 20; //servo actuation limit on either side e.g. 10deg = 10deg on either side = 20deg total
+float propThrust = 50; //prop's thrust for ground testing (should be enough to get control with TVC)
+float propBurnTime = 3000;
+
 const int SDCS = 6;
 const int flashCS = 5;
 const int ESPCS = 8;
 
-#include <SdFat.h>
+const int countdownTime = 10;
+
+//int ESPBaud = 38400; //baudrate between rp2040 and esp8266
+
+//#include <SdFat.h>
 //#include "Adafruit_SPIFlash.h"
 #include <LittleFS.h>
 //#include <SerialFlash.h>
@@ -41,7 +76,6 @@ const int ESPCS = 8;
 #include <MadgwickAHRS.h>
 #include <hardware/flash.h>
 #include "EEPROM.h"
-//#include <SD.h>
 //#include <SPIMemory.h>
 //#include <PID_v1.h>
 #include <SPI.h>
@@ -51,26 +85,26 @@ const int ESPCS = 8;
 #include <Servo.h>
 #include "BMI088.h"
 //#include "SPIFlash.h"
-#include "telem.h"
 #include "Arduino.h"
 //#include "SdFatConfig.h"
 //#include "ESP8266SdFat\SdFat.h"
-#include <Adafruit_SPIFlash.h>
+//#include <Adafruit_SPIFlash.h>
+#include <Mouse.h>
 
-#include "ff.h"
-#include "diskio.h"
+//#include "ff.h"
+//#include "diskio.h"
 
 #define DISK_LABEL    "EXT FLASH"
 
-#include "flash_config.h"
+//#include "flash_config.h"
 
-Adafruit_SPIFlash spiflash(&flashTransport);
+//Adafruit_SPIFlash spiflash(&flashTransport);
 
 //Adafruit_SPIFlash flash();
 
-FatVolume fatfs;
+//FatVolume fatfs;
 
-FATFS elmchamFatfs;
+//FATFS elmchamFatfs;
 
 uint8_t workbuf[4096]; // Working buffer for f_fdisk function.
 
@@ -79,9 +113,6 @@ uint8_t workbuf[4096]; // Working buffer for f_fdisk function.
 //#define ADAFRUIT_FLASHTRANSPORT_RP2040_H_
 //#define _LFS_LOGLEVEL_          4
 //#define FILE_NAME      "datalog.txt"
-
-float servoLimit = 10; //servo actuation limit on either side e.g. 10deg = 10deg on either side = 20deg total
-float centrepoint = 90; //servo centrepoint,usually 90
 
 float datalogInterval = 1000; //datalogging rate
 
@@ -119,7 +150,7 @@ float offset1;
 double anglex;
 double angley;
 double anglez;
-float roll, pitch, yaw;
+//float roll, pitch, yaw;
 //double servoAnglex;
 //double servoAnglez;
 double anglex1;
@@ -132,9 +163,11 @@ float oldMillis4 = 0;
 float cycleTime;
 float groundAlt = 0;
 //float vin;
-int runMode = 0;
+int runMode = 0; //
 int altcount = 0;
 int pyro1 = 10;
+int pyro2 = 11;
+int pyro3 = 12;
 int addr;
 int readAddr = 0;
 float altitude;
@@ -145,6 +178,7 @@ boolean led = false;
 boolean datalogging;
 boolean lockGyro = false;
 float vSpeed;
+boolean seenSerialInput;
 
 boolean statWrite;
 boolean SDAvailable = true;
@@ -161,16 +195,18 @@ float gx, gy, gz;
 float Vin;
 
 String datalogString;
+Telem telem;
+String lastEvent;
 
 Servo servox;
 Servo servoy;
-Servo parachute;
+Servo prop;
+//Servo parachute;
 
 //File flash;
 //SPIFlash exflash(5);
-SPITelem ESP(8);
 
-TVCClass TVC;
+TVCClass TVC(true, true);
 
 //File file1;
 
@@ -235,13 +271,6 @@ void setup() {
 
   //pidx.SetMode(AUTOMATIC);
   //pidz.SetMode(AUTOMATIC);
-  pinMode(10, OUTPUT); //pyros
-  pinMode(11, OUTPUT);
-  pinMode(12, OUTPUT);
-
-  pinMode(18, OUTPUT); //leds
-  pinMode(19, OUTPUT);
-  pinMode(20, OUTPUT);
 
   pinMode(26, INPUT); //vin / adc0
 
@@ -263,8 +292,12 @@ void setup() {
   servox.write(90);
   servoy.write(90);
 
-  parachute.attach(15);
-  parachute.write(0);
+  if (useProp == true) {
+    prop.attach(15);
+    prop.write(0);
+  }
+  //parachute.attach(15);
+  //parachute.write(0);
 
   //  parachute.attach(15);
   //  parachute.write(0);
@@ -272,13 +305,15 @@ void setup() {
   if (!gyro.begin()) {
     Serial.println("no gyro");
     digitalWrite(18, LOW);
-    while (1);
+    lastEvent = "no gyro";
+    runMode = -1;
   }
 
   while (!bme.begin()) {
     Serial.println("no baro");
     digitalWrite(18, LOW);
-    while (1);
+    lastEvent = "no baro";
+    runMode = -1;
   }
 
   //  if (!SD.begin(SDCS)) {
@@ -335,33 +370,42 @@ void setup() {
   ledg(1);
   groundAlt = alt();
   delay(200);
-  servox.write(80);
+  servox.write(centrepointX - 10);
   delay(100);
-  servox.write(90);
+  servox.write(centrepointX);
   delay(100);
-  servox.write(100);
+  servox.write(centrepointX + 10);
   delay(100);
-  servox.write(90);
+  servox.write(centrepointX);
   delay(100);
-  servoy.write(80);
+  servoy.write(centrepointY - 10);
   delay(100);
-  servoy.write(90);
+  servoy.write(centrepointY);
   delay(100);
-  servoy.write(100);
+  servoy.write(centrepointY + 10);
   ledr(0);
   delay(100);
   servoy.write(90);
   ledg(0);
+  servox.write(centrepointX);
+  servoy.write(centrepointY);
   EEPROM.end();
 }
 
 void loop() {
   //rp2040.idleOtherCore();
+  accel.readSensor();
+  gyro.readSensor();
+  TVC.estimateAngles(runMode, imuGain, accel.getAccelX_mss(), accel.getAccelY_mss(), accel.getAccelZ_mss(), gyro.getGyroX_rads(), gyro.getGyroY_rads(), gyro.getGyroZ_rads());
+
+  anglex = TVC.pitch();
+  angley = TVC.roll();
+  anglez = TVC.yaw();
+
   currMillis = millis();
   cycleTime = (currMillis - oldMillis2);
   oldMillis2 = millis();
-  accel.readSensor();
-  gyro.readSensor();
+
   vSpeed = baroVel();
   alt();
   smoothedAlt();
@@ -373,12 +417,6 @@ void loop() {
   gz = gyro.getGyroZ_rads();
   Vin = vin();
 
-  TVC.estimateAngles(runMode, imuGain, accel.getAccelX_mss(), accel.getAccelY_mss(), accel.getAccelZ_mss(), gyro.getGyroX_rads(), gyro.getGyroY_rads(), gyro.getGyroZ_rads());
-
-  anglex = TVC.anglex();
-  angley = TVC.angley();
-  anglez = TVC.anglez();
-
   accelSpeedy = (((accelSpeedy + (accel.getAccelY_mss())) - gravity));
   accelAlt = (accelAlt + accelSpeedy);
 
@@ -388,11 +426,31 @@ void loop() {
   Alt = alt();
   smoothedalt = smoothedAlt();
 
-  rp2040.idleOtherCore();
+  //rp2040.idleOtherCore();
 
-  datalogString = (String(currMillis) + ":     " + String(runMode) + "     " + String(anglex) + "     " + String(angley) + "     " + String(anglez) + "     " + String(servoanglex) + "     " + String(servoanglez) + "     " + "alt:" + "     " + String(Alt) + "     " + String(smoothedalt) + "     " + String(vSpeed) + "     " + String(Vin) + "     " + "raw accel readings:" + "     " + String(ax) + "     " + String(ay) + "     " + String(az) + "     " + "gyro:" + "     " + String(gx * RAD_TO_DEG) + "     " + String(gy * RAD_TO_DEG) + "     " + String(gz * RAD_TO_DEG) + "     " + String(cycleTime));
+  datalogString = (String(currMillis) + ": " + String(runMode) + " " + String(TVC.pitch()) + " " + String(TVC.roll()) + " " + String(TVC.yaw()) + " " + String(servoanglex - centrepointX) + " " + String(servoanglez - centrepointY) + " " + "alt:" + " " + String(Alt) + " " + String(smoothedalt) + " " + String(vSpeed) + " " + String(Vin) + " " + "raw accel readings:" + " " + String(ax) + " " + String(ay) + " " + String(az) + " filtered az: " + String(TVC.filteredAccelY()) + " " + "gyro:" + " " + String(gx * RAD_TO_DEG) + " " + String(gy * RAD_TO_DEG) + " " + String(gz * RAD_TO_DEG) + " " + String(cycleTime) + " " + lastEvent);
 
-  rp2040.resumeOtherCore();
+  //  telem.currMillis = currMillis;
+  //  telem.runMode = runMode;
+  //  telem.Anglex = anglex;
+  //  telem.Angley = angley;
+  //  telem.Anglez = anglez;
+  //  telem.servoanglex = servoanglex - 90;
+  //  telem.servoanglez = servoanglez - 90;
+  //  telem.Alt = Alt;
+  //  telem.smoothedalt = smoothedalt;
+  //  telem.vSpeed = vSpeed;
+  //  telem.Vin = Vin;
+  //  telem.ax = ax;
+  //  telem.ay = ay;
+  //  telem.az = az;
+  //  telem.gx = gx;
+  //  telem.gy = gy;
+  //  telem.gz = gz;
+  //  telem.cycleTime = cycleTime;
+  //  telem.lastEvent = lastEvent;
+
+  //rp2040.resumeOtherCore();
 
   //  anglex = (anglex + (gyro.getGyroX_rads() * (M_PI / 180) * ((4078/71) * 1.5)));
   //  angley = (angley + (gyro.getGyroY_rads() * (M_PI / 180) * ((4078/71) * 1.5)));
@@ -482,13 +540,13 @@ void loop() {
     if (serialInput == "set") {
       set(serialInput);
     }
-    if (serialInput == "defaults") {
-      EEPROM.write(0, defaultP);
-      EEPROM.write(1, defaultI);
-      EEPROM.write(2, defaultD);
-      EEPROM.write(3, defaultDelay);
-      Serial.println("reset settings to defaults");
-    }
+    //    if (serialInput == "defaults") {
+    //      EEPROM.write(0, defaultP);
+    //      EEPROM.write(1, defaultI);
+    //      EEPROM.write(2, defaultD);
+    //      EEPROM.write(3, defaultDelay);
+    //      Serial.println("reset settings to defaults");
+    //    }
     if (serialInput == "getpids") {
       Serial.println(Kp);
       Serial.println(Ki);
@@ -518,7 +576,257 @@ void loop() {
     if (serialInput == "descent") {
       runMode = 3;
     }
-    serialInput = ""; //flush the buffer
+    if (serialInput == "testAllPyros"){
+      Serial.println("Pyros will be held ON until otherwise");
+      digitalWrite(pyro1, HIGH);
+      digitalWrite(pyro2, HIGH);
+      digitalWrite(pyro3, HIGH);
+    }
+    if (serialInput == "allPyrosOff"){
+      Serial.println("All pyro channels OFF");
+      digitalWrite(pyro1, LOW);
+      digitalWrite(pyro2, LOW);
+      digitalWrite(pyro3, LOW);
+    }
+    if (serialInput == "pyro1") {
+      //TVC.pyro1();
+      ledr(1);
+      ledg(0);
+      ledb(0);
+      digitalWrite(pyro1, HIGH);
+      delay(250);
+      digitalWrite(pyro1, LOW);
+      ledr(0);
+      ledg(1);
+      ledb(1);
+      Serial.println("fired pyro channel 1 (hopefully)");
+    }
+    if (serialInput == "pyro2") {
+      TVC.pyro2();
+    }
+    if (serialInput == "pyro3") {
+      TVC.pyro3();
+    }
+    if (serialInput == "servox") {
+      servox.write(centrepointX + servoLimit);
+      delay(100);
+      servox.write(centrepointX - servoLimit);
+      delay(100);
+      servox.write(centrepointX);
+    }
+    if (serialInput == "servoy") {
+      servoy.write(centrepointY + servoLimit);
+      delay(100);
+      servoy.write(centrepointY - servoLimit);
+      delay(100);
+      servoy.write(centrepointY);
+    }
+    if (serialInput == "dumpFlash") {
+      int oldrunmode = runMode;
+      runMode = -2;
+      File data = LittleFS.open("/data.txt", "r");
+      Serial.println("dumping flash:");
+      while (data.available()) {
+        Serial.write(data.read());
+      }
+      data.close();
+      runMode = oldrunmode;
+      //serialInput = "";
+    }
+    if (serialInput == "defaults") {
+      LittleFS.remove("/config.txt");
+      File file = LittleFS.open("/config.txt", "a");
+      file.println(defaultP);
+      file.println(defaultI);
+      file.println(defaultD);
+      file.println(defaultDelay);
+      file.close();
+      rp2040.reboot();
+    }
+    if ((serialInput == "deleteTelem") or (serialInput == "clearTelem")) {
+      if (LittleFS.exists("/config.txt")) {
+        LittleFS.remove("/config.txt");
+        Serial.println("done");
+      }
+      else {
+        Serial.println("the config file for some unhelpful reason does not appear to exist");
+      }
+      //serialInput = "";
+    }
+    if ((serialInput == "dumpConfig") or (serialInput == "getConfig")) {
+      int oldrunmode = runMode;
+      runMode = -2;
+      File file = LittleFS.open("config.txt", "r");
+      Serial.println("dumping config from flash");
+      while (file.available()) {
+        Serial.write(file.read());
+      }
+      file.close();
+      runMode = oldrunmode;
+      //serialInput = "";
+    }
+    //  if (BOOTSEL) {
+    //    buz(1);
+    //    runMode = 4;
+    //  }
+    //  if (!BOOTSEL) {
+    //    buz(0);
+    //  }
+    if (serialInput == "flashtoSD") {
+      flashtoSD();
+      //serialInput = "";
+    }
+    if (serialInput == "SDtoFlash" or serialInput == "SDtoflash") {
+      SDtoflash();
+    }
+    if ((serialInput == "SDDump") or (serialInput == "dumpSD")) {
+      SDDump();
+      //serialInput = "";
+    }
+    if (serialInput == "formatExternalFlash") {
+      //formatExternalFlash();
+      //serialInput = "";
+    }
+    //  if (serialInput == "flashtoSD") {
+    //    int oldrunmode = runMode;
+    //    runMode = -2;
+    //    File data = LittleFS.open("/data.txt", "r");
+    //    File file = SD.open("flash.txt", FILE_WRITE);
+    //    while (data.available()) {
+    //      file.write(data.read());
+    //      //rp2040.fifo.push(data.read());
+    //      //fifo = data.read();
+    //    }
+    //  data.close();
+    //  file.close();
+    //  Serial.println("Copied all data from internal Flash to MicroSD card");
+    //  runMode = oldrunmode;
+    //}
+    if (serialInput == "formatFlash") {
+      LittleFS.format();
+      Serial.println("formatted flash!");
+      //serialInput = "";
+    }
+    if (serialInput == "clearFlashDatalog") {
+      LittleFS.remove("/data.txt");
+      Serial.println("done");
+    }
+    if (serialInput == "wipeFlash") {
+      LittleFS.rmdir("/");
+      Serial.println("done");
+    }
+    //    if (serialInput == "clearExternalFlash") {
+    //      fatfs.rmdir("/");
+    //      Serial.println("done");
+    //      //serialInput = "";
+    //    }
+    //  if (serialInput == "formatExternalFlash") {
+    //    // Make filesystem.
+    //    FRESULT r = f_mkfs("", FM_FAT, 0, workbuf, sizeof(workbuf));
+    //    if (r != FR_OK) {
+    //      Serial.print("Error, f_mkfs failed with error code: "); Serial.println(r, DEC);
+    //      while (1) yield();
+    //    }
+    //    // mount to set disk label
+    //    r = f_mount(&elmchamFatfs, "0:", 1);
+    //    if (r != FR_OK) {
+    //      Serial.print("Error, f_mount failed with error code: "); Serial.println(r, DEC);
+    //      while (1) yield();
+    //    }
+    //    // Setting label
+    //    Serial.println("Setting disk label to: " DISK_LABEL);
+    //    r = f_setlabel(DISK_LABEL);
+    //    if (r != FR_OK) {
+    //      Serial.print("Error, f_setlabel failed with error code: "); Serial.println(r, DEC);
+    //      while (1) yield();
+    //    }
+    //    // unmount
+    //    f_unmount("0:");
+    //    // sync to make sure all data is written to flash
+    //    flash.syncBlocks();
+    //    Serial.println("Formatted flash!");
+    //    if (!fatfs.begin(&flash)) {
+    //      Serial.println("Error, failed to mount newly formatted filesystem!");
+    //      while (1) delay(1);
+    //    }
+    //  }
+    //    if (serialInput == "dumpExternalFlash") {
+    //      Serial.println("dumping external flash");
+    //      File32 flash = fatfs.open("datalog.txt", FILE_READ);
+    //      while (flash.available()) {
+    //        Serial.write(flash.read());
+    //      }
+    //      //serialInput = "";
+    //    }
+    if (serialInput == "gimbalTest") {
+      Serial.println("going into gimbalTest mode, adding accel into angles");
+      runMode = 69;
+    }
+    if (serialInput == "countdown") {
+      Serial.println("I will count down from 10, then go into poweredAscent mode");
+      runMode = -3;
+    }
+    if (serialInput == "calibrateESC") {
+      Serial.println("make sure the esc on the servo3 connector is unplugged from VBAT");
+      prop.write(0);
+      delay(2000);
+      Serial.println("plug in the ESC and wait");
+      prop.write(180);
+      delay(15000);
+      prop.write(0);
+    }
+    if (serialInput == "testProp") {
+      Serial.println("testing prop");
+      prop.write(10);
+      delay(5000);
+      prop.write(0);
+    }
+    if (serialInput == "testPropInf") {
+      Serial.println("the prop will run until stopProp is run");
+      prop.write(10);
+    }
+    if (serialInput == "stopProp") {
+      Serial.println("stopping prop");
+      prop.write(0);
+    }
+    if (serialInput == "propSpeedTest") {
+      Serial.println("prop speed will be ramped up from 0 to max and back");
+      int propSpeed = 0;
+      while (propSpeed <= 50) {
+        propSpeed += 1;
+        prop.write(propSpeed);
+        delay(30);
+      }
+      while (propSpeed >= 0) {
+        propSpeed -= 1;
+        //        if (propSpeed <= 0){
+        //          propSpeed = 0;
+        //        }
+        prop.write(propSpeed);
+        delay(30);
+      }
+      prop.write(0);
+    }
+    //serialInput = "";
+    if (serialInput == "formatSD") {
+      SDFS.format();
+      Serial.println("done");
+    }
+    if (serialInput == "wipeSD") {
+      SD.remove("datalog.txt");
+      SD.rmdir("/");
+      Serial.println("done");
+    }
+    if ((serialInput == "autoClicker") or (serialInput == "autoclicker")) {
+      Mouse.begin();
+      while (1) {
+        Mouse.click();
+      }
+    }
+    //  if (serialInput == "eepromtoSD"){
+    //    eepromtoSD();
+    //  }
+    //serialInput = ""; //flush the buffer
   }
 
   //rp2040.idleOtherCore();
@@ -532,8 +840,12 @@ void loop() {
   //rp2040.resumeOtherCore();
 
   //runmodes
+  if (runMode == -3) {
+    countdown();
+  }
   if (runMode == -2) { //cli mode
     //cli();
+    //cmd();
   }
   if (runMode == -1) { //error 1
 
@@ -552,43 +864,46 @@ void loop() {
   }
   if (runMode == 4) {
     //runMode = 0;
-    rp2040.reboot(); //reboot in case of accidental launch detect or multiple flights
+    //rp2040.reboot(); //reboot in case of accidental launch detect or multiple flights
     landed();
+  }
+  if (runMode == 69) {
+    gimbalTest();
   }
 
   //  Serial.println(alt());
   if (runMode >= 0) {
     //SPI.transfer(alt());
     //Serial.println(EEPROM.length());
-//    Serial.print(anglex);
-//    Serial.print("     ");
-//    Serial.print(angley);
-//    Serial.print("     ");
-//    Serial.print(anglez);
-//    Serial.print("     ");
-//    //Serial.print(cycleTime);
-//    //Serial.print("     ");
-//    //Serial.print(accelSpeedy);
-//    //Serial.print("     ");
-//    //Serial.print(accelAlt);
-//    Serial.print(servoAnglex() - centrepoint);
-//    Serial.print("     ");
-//    Serial.print(servoAnglez() - centrepoint);
-//    Serial.print("     ");
-//    Serial.print("alt: ");
-//    Serial.print("     ");
-//    Serial.print(alt());
-//    Serial.print("     ");
-//    Serial.print(smoothedAlt());
-//    Serial.print("     ");
-//    Serial.print(vSpeed);
-//    Serial.print("     ");
-//    Serial.print(vin());
-//    Serial.print("     ");
-//    Serial.print(cycleTime);
-//    Serial.print("     ");
-    Serial.print(datalogString);
-    Serial.println();
+    //    Serial.print(anglex);
+    //    Serial.print("     ");
+    //    Serial.print(angley);
+    //    Serial.print("     ");
+    //    Serial.print(anglez);
+    //    Serial.print("     ");
+    //    //Serial.print(cycleTime);
+    //    //Serial.print("     ");
+    //    //Serial.print(accelSpeedy);
+    //    //Serial.print("     ");
+    //    //Serial.print(accelAlt);
+    //    Serial.print(servoAnglex() - centrepoint);
+    //    Serial.print("     ");
+    //    Serial.print(servoAnglez() - centrepoint);
+    //    Serial.print("     ");
+    //    Serial.print("alt: ");
+    //    Serial.print("     ");
+    //    Serial.print(alt());
+    //    Serial.print("     ");
+    //    Serial.print(smoothedAlt());
+    //    Serial.print("     ");
+    //    Serial.print(vSpeed);
+    //    Serial.print("     ");
+    //    Serial.print(vin());
+    //    Serial.print("     ");
+    //    Serial.print(cycleTime);
+    //    Serial.print("     ");
+    //    Serial.print(datalogString);
+    //    Serial.println();
   }
 
   //  if (SDCard == true){
@@ -621,6 +936,7 @@ void loop() {
 }
 
 void setup1() {
+  //ESPSerial.begin(38400);
   //  SPI.setRX(4);
   //  SPI.setTX(3);
   //  SPI.setSCK(2);
@@ -628,12 +944,10 @@ void setup1() {
   //  SPI.begin();
   //
   SPISetup();
-  exFlashSetup();
+  //exFlashSetup();
   flashSetup();
-  //SDSetup();
+  SDSetup();
 
-
-  //ESP.begin(8);
   //telemSetup(8);
 
   if (LittleFS.exists("/config.txt")) {
@@ -655,6 +969,10 @@ void setup1() {
     Ki = defaultI;
     Kd = defaultD;
   }
+
+  //  while (BOOTSEL){
+  //    runMode = 0; //set runmode to "waiting" if bootsel pressed (can be used for arming)
+  //  }
 
   //  EEPROM.begin(98304);
   //  Kp = (EEPROM.read(0));
@@ -685,6 +1003,21 @@ void setup1() {
 byte fifo;
 
 void loop1() {
+
+  //servoanglex();
+  //servoangley();
+
+  if (runMode == -2) {
+    cmd();
+  }
+  //ESPSerial.println(datalogString);
+  if (runMode >= 0) {
+    Serial.println(datalogString); //has to be on the second core since if it's on the first core that somehow breaks estimateAngles();
+  }
+  //ESP.send(datalogString);
+  //int ESPMessageSize = sizeof(datalogString);
+  //char ESPMessage[ESPMessageSize] = datalogString;
+  //ESPSerial.println(datalogString);
   //  int num1 = serialInput.parseInt();
   //  int num2 = serialInput.parseInt();
   //  if ((num1 != 0) & (num2 != 0)){
@@ -722,136 +1055,25 @@ void loop1() {
   //      savedTelem == true;
   //    }
   //  }
-  if (serialInput == "dumpFlash") {
-    int oldrunmode = runMode;
-    runMode = -2;
-    File data = LittleFS.open("/data.txt", "r");
-    Serial.println("dumping flash:");
-    while (data.available()) {
-      Serial.write(data.read());
-    }
-    data.close();
-    runMode = oldrunmode;
-  }
-  if (serialInput == "defaults") {
-    LittleFS.remove("/config.txt");
-    File file = LittleFS.open("/config.txt", "a");
-    file.println(defaultP);
-    file.println(defaultI);
-    file.println(defaultD);
-    file.println(defaultDelay);
-    file.close();
-    rp2040.reboot();
-  }
-  if ((serialInput == "deleteTelem") or (serialInput == "clearTelem")) {
-    if (LittleFS.exists("/config.txt")) {
-      LittleFS.remove("/config.txt");
-      Serial.println("done");
-    }
-    else {
-      Serial.println("the config file for some unhelpful reason does not appear to exist");
-    }
-  }
-  if ((serialInput == "dumpConfig") or (serialInput == "getConfig")) {
-    int oldrunmode = runMode;
-    runMode = -2;
-    File file = LittleFS.open("config.txt", "r");
-    Serial.println("dumping config from flash");
-    while (file.available()) {
-      Serial.write(file.read());
-    }
-    file.close();
-    runMode = oldrunmode;
-  }
-  //  if (BOOTSEL) {
-  //    buz(1);
-  //    runMode = 4;
-  //  }
-  //  if (!BOOTSEL) {
-  //    buz(0);
-  //  }
-  if (serialInput == "flashtoSD") {
-    //flashtoSD();
-  }
-  if ((serialInput == "SDDump") or (serialInput == "dumpSD")) {
-    //SDDump();
-  }
-  if (serialInput == "formatExternalFlash") {
-    formatExternalFlash();
-  }
-  //  if (serialInput == "flashtoSD") {
-  //    int oldrunmode = runMode;
-  //    runMode = -2;
-  //    File data = LittleFS.open("/data.txt", "r");
-  //    File file = SD.open("flash.txt", FILE_WRITE);
-  //    while (data.available()) {
-  //      file.write(data.read());
-  //      //rp2040.fifo.push(data.read());
-  //      //fifo = data.read();
-  //    }
-  //  data.close();
-  //  file.close();
-  //  Serial.println("Copied all data from internal Flash to MicroSD card");
-  //  runMode = oldrunmode;
-  //}
-  if (serialInput == "formatFlash") {
-    LittleFS.format();
-    Serial.println("formatted flash!");
-  }
-  if (serialInput == "clearExternalFlash") {
-    fatfs.rmdir("/");
-    Serial.println("done");
-  }
-  //  if (serialInput == "formatExternalFlash") {
-  //    // Make filesystem.
-  //    FRESULT r = f_mkfs("", FM_FAT, 0, workbuf, sizeof(workbuf));
-  //    if (r != FR_OK) {
-  //      Serial.print("Error, f_mkfs failed with error code: "); Serial.println(r, DEC);
-  //      while (1) yield();
-  //    }
-  //    // mount to set disk label
-  //    r = f_mount(&elmchamFatfs, "0:", 1);
-  //    if (r != FR_OK) {
-  //      Serial.print("Error, f_mount failed with error code: "); Serial.println(r, DEC);
-  //      while (1) yield();
-  //    }
-  //    // Setting label
-  //    Serial.println("Setting disk label to: " DISK_LABEL);
-  //    r = f_setlabel(DISK_LABEL);
-  //    if (r != FR_OK) {
-  //      Serial.print("Error, f_setlabel failed with error code: "); Serial.println(r, DEC);
-  //      while (1) yield();
-  //    }
-  //    // unmount
-  //    f_unmount("0:");
-  //    // sync to make sure all data is written to flash
-  //    flash.syncBlocks();
-  //    Serial.println("Formatted flash!");
-  //    if (!fatfs.begin(&flash)) {
-  //      Serial.println("Error, failed to mount newly formatted filesystem!");
-  //      while (1) delay(1);
+
+  //  if (ESPSerial.available()) {
+  //    if (!isDigit(ESPSerial.peek())) {
+  //      serialInput = ESPSerial.readString();
+  //      serialInput.trim();
   //    }
   //  }
-  if (serialInput == "dumpExternalFlash") {
-    Serial.println("dumping external flash");
-    File32 flash = fatfs.open("datalog.txt", FILE_READ);
-    while (flash.available()) {
-      Serial.write(flash.read());
-    }
-  }
-  //  if (serialInput == "formatSD") {
-  //    SDFS.format();
-  //    Serial.println("done");
-  //  }
-  //  if (serialInput == "eepromtoSD"){
-  //    eepromtoSD();
-  //  }
+
+
   if (runMode >= 0) {
     if (datalogging == true) {
-      //exFlashDatalog();
       datalog();
-      flashDatalog();
-      //SDDatalog();
+      //exFlashDatalog();
+      if (logToFlash == true) {
+        flashDatalog();
+      }
+      if (logToSD == true) {
+        SDDatalog();
+      }
     }
     if (datalogging == false) {
       //data.close();
@@ -865,50 +1087,88 @@ void loop1() {
   //  }
 }
 
+//void ESPSend() {
+//  ESP.send(currMillis);
+//  ESP.send(runMode);
+//  ESP.send(anglex);
+//  ESP.send(angley);
+//  ESP.send(anglez);
+//  ESP.send(servoanglex - 90);
+//  ESP.send(servoanglez - 90);
+//  ESP.send(Alt);
+//  ESP.send(smoothedalt);
+//  ESP.send(vSpeed);
+//  ESP.send(Vin);
+//  ESP.send(ax);
+//  ESP.send(ay);
+//  ESP.send(az);
+//  ESP.send(gx * RAD_TO_DEG);
+//  ESP.send(gy * RAD_TO_DEG);
+//  ESP.send(gz * RAD_TO_DEG);
+//  ESP.send(cycleTime);
+//  ESP.send(lastEvent);
+//}
+
+void cmd() {
+  ledr(1);
+  ledg(1);
+  ledb(1);
+  //Serial.println(ESP.read());
+}
+
 void SPISetup() {
   SPI.setRX(4);
   SPI.setTX(3);
   SPI.setSCK(2);
+  //SPI.beginTransaction(SPISettings(10000000, LSBFIRST, SPI_MODE0));
   SPI.begin();
 }
 
-void exFlashSetup() {
-  //flash.begin();
-  if (!spiflash.begin()) {
-    Serial.println("flash error");
-  }
-  if (!fatfs.begin(&spiflash)) {
-    Serial.println("SPI flash partition error for some reason");
-    formatExternalFlash();
-    rp2040.reboot();
-  }
-  else {
-    Serial.println("spi flash init done");
-  }
-  File32 exflash = fatfs.open("datalog.txt", FILE_WRITE);
-  exflash.println();
-  exflash.println();
-  exflash.println();
-  exflash.println();
-  exflash.println();
-  exflash.close();
-}
-
-//void SDSetup() {
-//  if (!SD.begin(SDCS)) {
-//    Serial.println("no sd card");
-//    SDAvailable = false;
-//    tone(9, 200, 200);
-//    delay(200);
+//void exFlashSetup() {
+//  //flash.begin();
+//  if (!spiflash.begin()) {
+//    Serial.println("flash error");
 //  }
-//  File file = SD.open("datalog.txt", FILE_WRITE);
-//  file.println();
-//  file.println();
-//  file.println();
-//  file.println();
-//  file.println();
-//  file.close();
+//  if (!fatfs.begin(&spiflash)) {
+//    Serial.println("SPI flash partition error for some reason");
+//    formatExternalFlash();
+//    rp2040.reboot();
+//  }
+//  else {
+//    Serial.println("spi flash init done");
+//  }
+//  File32 exflash = fatfs.open("datalog.txt", FILE_WRITE);
+//  exflash.println();
+//  exflash.println();
+//  exflash.println();
+//  exflash.println();
+//  exflash.println();
+//  exflash.close();
 //}
+
+void SDSetup() {
+  if (!SD.begin(SDCS)) {
+    Serial.println("no sd card");
+    SDAvailable = false;
+    tone(9, 200, 200);
+    delay(200);
+  }
+  File file = SD.open("datalog.txt", FILE_WRITE);
+  file.println();
+  file.println();
+  file.println();
+  file.println();
+  file.println();
+  file.close();
+  if (SD.exists("config.txt")) {
+    LittleFS.remove("config.txt");
+    File file = SD.open("config.txt", FILE_READ);
+    File flash = LittleFS.open("config.txt", "a");
+    while (file.available()) {
+      flash.write(file.read());
+    }
+  }
+}
 
 void flashSetup() {
   LittleFS.begin();
@@ -926,48 +1186,33 @@ void flashSetup() {
   }
 }
 
-//void flashtoSD() {
-//  File file = SD.open("flash.txt", FILE_WRITE);
-//  File flash = LittleFS.open("data.txt", "r");
-//  while (flash.available()) {
-//    file.write(flash.read());
-//  }
-//  //  while (fifo != -1) {
-//  //file.write(rp2040.fifo.pop());
-//  //file.write(fifo);
-//  //Serial.println("pop");
-//  //  }
-//  file.close();
-//  flash.close();
-//  Serial.println("Copied all data from internal QPSI flash to the MicroSD card");
-//  Serial.println("done");
-//}
+void flashtoSD() {
+  File file = SD.open("datalog.txt", FILE_WRITE);
+  File flash = LittleFS.open("data.txt", "r");
+  while (flash.available()) {
+    file.write(flash.read());
+  }
+  //  while (fifo != -1) {
+  //file.write(rp2040.fifo.pop());
+  //file.write(fifo);
+  //Serial.println("pop");
+  //  }
+  file.close();
+  flash.close();
+  Serial.println("Copied all data from internal QPSI flash to the MicroSD card");
+  Serial.println("done");
+}
 
-void telemSend() {
-  if (runMode >= 1) {
-    ESP.send(69); //datalogString 
+void SDtoflash() {
+  File file = SD.open("datalog.txt", FILE_READ);
+  File flash = LittleFS.open("data.txt", "a");
+  while (file.available()) {
+    flash.write(file.read());
   }
-  else {
-    ESP.send(25);
-  }
-  //  ESP.send(69);
-  //  ESP.send(currMillis);
-  //  ESP.send(runMode);
-  //  ESP.send(anglex);
-  //  ESP.send(angley);
-  //  ESP.send(anglez);
-  //  ESP.send(servoanglex - centrepoint);
-  //  ESP.send(servoanglez - centrepoint);
-  //  ESP.send(Alt);
-  //  ESP.send(smoothedalt);
-  //  ESP.send(vSpeed);
-  //  ESP.send(Vin);
-  //  ESP.send(ax);
-  //  ESP.send(ay);
-  //  ESP.send(az);
-  //  ESP.send(gx * RAD_TO_DEG);
-  //  ESP.send(gy * RAD_TO_DEG);
-  //  ESP.send(gz * RAD_TO_DEG);
+  file.close();
+  flash.close();
+  Serial.println("Copied all data from MicroSD card to internal QSPI flash");
+  Serial.println("done");
 }
 
 //void flashDatalog() {
@@ -1028,6 +1273,16 @@ void telemSend() {
 //  }
 //}
 
+void SDDatalog() {
+  if (SDAvailable == true) {
+    File file = SD.open("datalog.txt", FILE_WRITE);
+    if (file) {
+      file.println(datalogString);
+      file.close();
+    }
+  }
+}
+
 //void SDDatalog() {
 //  static boolean writeMode = false;
 //  static float oldMillis69 = 1000;
@@ -1036,48 +1291,49 @@ void telemSend() {
 //      if (SDAvailable == true) {
 //        File file = SD.open("datalog.txt", FILE_WRITE);
 //        if (file) {
-//          file.print(currMillis);
-//          file.print(":     ");
-//          file.print(runMode);
-//          file.print("     ");
-//          file.print(anglex);
-//          file.print("     ");
-//          file.print(angley);
-//          file.print("     ");
-//          file.print(anglez);
-//          file.print("     ");
-//          file.print(servoanglex - centrepoint);
-//          file.print("     ");
-//          file.print(servoanglez - centrepoint);
-//          file.print("     ");
-//          file.print("alt: ");
-//          file.print("     ");
-//          file.print(Alt);
-//          file.print("     ");
-//          file.print(smoothedalt);
-//          file.print("     ");
-//          file.print(vSpeed);
-//          file.print("     ");
-//          file.print(Vin);
-//          file.print("     ");
-//          file.print("accel raw readings");
-//          file.print("     ");
-//          file.print(ax);
-//          file.print("     ");
-//          file.print(ay);
-//          file.print("     ");
-//          file.print(az);
-//          file.print("     ");
-//          file.print("gyro:");
-//          file.print("     ");
-//          file.print(gx * RAD_TO_DEG);
-//          file.print("     ");
-//          file.print(gy * RAD_TO_DEG);
-//          file.print("     ");
-//          file.print(gz * RAD_TO_DEG);
-//          file.println();
-//          //delay(100);
-//          file.close();
+//          file.println(datalogString);
+////          file.print(currMillis);
+////          file.print(":     ");
+////          file.print(runMode);
+////          file.print("     ");
+////          file.print(anglex);
+////          file.print("     ");
+////          file.print(angley);
+////          file.print("     ");
+////          file.print(anglez);
+////          file.print("     ");
+////          file.print(servoanglex - centrepoint);
+////          file.print("     ");
+////          file.print(servoanglez - centrepoint);
+////          file.print("     ");
+////          file.print("alt: ");
+////          file.print("     ");
+////          file.print(Alt);
+////          file.print("     ");
+////          file.print(smoothedalt);
+////          file.print("     ");
+////          file.print(vSpeed);
+////          file.print("     ");
+////          file.print(Vin);
+////          file.print("     ");
+////          file.print("accel raw readings");
+////          file.print("     ");
+////          file.print(ax);
+////          file.print("     ");
+////          file.print(ay);
+////          file.print("     ");
+////          file.print(az);
+////          file.print("     ");
+////          file.print("gyro:");
+////          file.print("     ");
+////          file.print(gx * RAD_TO_DEG);
+////          file.print("     ");
+////          file.print(gy * RAD_TO_DEG);
+////          file.print("     ");
+////          file.print(gz * RAD_TO_DEG);
+////          file.println();
+////          //delay(100);
+////          file.close();
 //        }
 //      }
 //      writeMode = false;
@@ -1089,69 +1345,69 @@ void telemSend() {
 //  }
 //}
 
-void exFlashDatalog() {
-  String datalogString2 = datalogString + "     ";
-  static boolean datalogged = false;
-  static int olderMillis = 0;
-  if ((millis() - olderMillis) >= (500 / 2)) {
-    if (datalogged == false) {
-      datalogged = true;
-    }
-    if (datalogged == true) {
-      File32 exflash = fatfs.open("datalog.txt", FILE_WRITE);
-      if (exflash) {
-        exflash.print(datalogString2);
-        //    exflash.print(currMillis);
-        //    exflash.print(":     ");
-        //    exflash.print(runMode);
-        //    exflash.print("     ");
-        //    exflash.print(anglex);
-        //    exflash.print("     ");
-        //    exflash.print(angley);
-        //    exflash.print("     ");
-        //    exflash.print(anglez);
-        //    exflash.print("     ");
-        //    exflash.print(servoanglex - centrepoint);
-        //    exflash.print("     ");
-        //    exflash.print(servoanglez - centrepoint);
-        //    exflash.print("     ");
-        //    exflash.print("alt: ");
-        //    exflash.print("     ");
-        //    exflash.print(Alt);
-        //    exflash.print("     ");
-        //    exflash.print(smoothedalt);
-        //    exflash.print("     ");
-        //    exflash.print(vSpeed);
-        //    exflash.print("     ");
-        //    exflash.print(Vin);
-        //    exflash.print("     ");
-        //    exflash.print("accel raw readings");
-        //    exflash.print("     ");
-        //    exflash.print(ax);
-        //    exflash.print("     ");
-        //    exflash.print(ay);
-        //    exflash.print("     ");
-        //    exflash.print(az);
-        //    exflash.print("     ");
-        //    exflash.print("gyro:");
-        //    exflash.print("     ");
-        //    exflash.print(gx * RAD_TO_DEG);
-        //    exflash.print("     ");
-        //    exflash.print(gy * RAD_TO_DEG);
-        //    exflash.print("     ");
-        //    exflash.print(gz * RAD_TO_DEG);
-        exflash.println();
-        //delay(100);
-        exflash.close();
-      }
-      else {
-        Serial.println("external flash datalogging error");
-      }
-      datalogged = false;
-    }
-    olderMillis = millis();
-  }
-}
+//void exFlashDatalog() {
+//  String datalogString2 = datalogString + "     ";
+//  static boolean datalogged = false;
+//  static int olderMillis = 0;
+//  if ((millis() - olderMillis) >= (500 / 2)) {
+//    if (datalogged == false) {
+//      datalogged = true;
+//    }
+//    if (datalogged == true) {
+//      File32 exflash = fatfs.open("datalog.txt", FILE_WRITE);
+//      if (exflash) {
+//        exflash.print(datalogString2);
+//        //    exflash.print(currMillis);
+//        //    exflash.print(":     ");
+//        //    exflash.print(runMode);
+//        //    exflash.print("     ");
+//        //    exflash.print(anglex);
+//        //    exflash.print("     ");
+//        //    exflash.print(angley);
+//        //    exflash.print("     ");
+//        //    exflash.print(anglez);
+//        //    exflash.print("     ");
+//        //    exflash.print(servoanglex - centrepoint);
+//        //    exflash.print("     ");
+//        //    exflash.print(servoanglez - centrepoint);
+//        //    exflash.print("     ");
+//        //    exflash.print("alt: ");
+//        //    exflash.print("     ");
+//        //    exflash.print(Alt);
+//        //    exflash.print("     ");
+//        //    exflash.print(smoothedalt);
+//        //    exflash.print("     ");
+//        //    exflash.print(vSpeed);
+//        //    exflash.print("     ");
+//        //    exflash.print(Vin);
+//        //    exflash.print("     ");
+//        //    exflash.print("accel raw readings");
+//        //    exflash.print("     ");
+//        //    exflash.print(ax);
+//        //    exflash.print("     ");
+//        //    exflash.print(ay);
+//        //    exflash.print("     ");
+//        //    exflash.print(az);
+//        //    exflash.print("     ");
+//        //    exflash.print("gyro:");
+//        //    exflash.print("     ");
+//        //    exflash.print(gx * RAD_TO_DEG);
+//        //    exflash.print("     ");
+//        //    exflash.print(gy * RAD_TO_DEG);
+//        //    exflash.print("     ");
+//        //    exflash.print(gz * RAD_TO_DEG);
+//        exflash.println();
+//        //delay(100);
+//        exflash.close();
+//      }
+//      else {
+//        Serial.println("external flash datalogging error");
+//      }
+//      datalogged = false;
+//    }
+//    olderMillis = millis();
+//  }
+//}
 
 void flashDatalog() {
   static boolean savedTelem = false;
@@ -1175,18 +1431,79 @@ void flashDatalog() {
   }
 }
 
+void countdown() {
+  lastEvent = "counting down for launch";
+  static int olderMillis = millis();
+  //static int oldestMillis = millis();
+  static int countdown = countdownTime;
+  static boolean led = true;
+  if (countdown >= 1) {
+    if (millis() - olderMillis >= 500) {
+      if (led == true) {
+        ledr(1);
+        ledg(0);
+        ledb(0);
+        tone(9, 500, 500);
+        Serial.println(countdown);
+        countdown -= 1;
+        led = false;
+      }
+      else {
+        ledr(0);
+        ledg(0);
+        ledb(0);
+        led = true;
+      }
+      olderMillis = millis();
+    }
+  }
+  if (countdown <= 0) { //if more than 10 seconds has elapsed //if (millis() - oldestMillis >= countdown * 1000)
+    static boolean Set = false;
+    if (Set == false) {
+      digitalWrite(pyro2, HIGH); //pyro2 on
+      olderMillis = millis();
+      Set = true;
+    }
+    else {
+      if (millis() - olderMillis >= pyroTime) {
+        tone(9, 1000, 200);
+        digitalWrite(pyro2, LOW);
+        ledr(0);
+        ledg(0);
+        ledb(0);
+        lockGyro = false;
+        addr = startAddr;
+        datalogging = true;
+        lastEvent = "ignition";
+        countdown = countdownTime;
+        if (groundTest == true) {
+          if (useProp == true) {
+            prop.write(propThrust);
+          }
+        }
+        runMode = 1; //poweredAscent mode
+      }
+    }
+  }
+}
+
 void wait() {
+  lastEvent = "waiting for launch";
+  servox.write(centrepointX);
+  servoy.write(centrepointY);
   if ((currMillis - oldMillis4) >= 500) {
     oldMillis4 = currMillis;
     if (led == true) {
       //parachute.write(0);
       ledg(1);
       ledr(1);
+      ledb(0);
       led = false;
     }
     else {
       ledr(0);
       ledg(0);
+      ledb(0);
       led = true;
     }
   }
@@ -1195,21 +1512,44 @@ void wait() {
     offset1 = (accel.getAccelY_mss() - gravity);
     foundGravity = true;
   }
-  Serial.println("waiting on pad");
+  //Serial.println("waiting on pad");
   lockGyro = true; // prevent gyro drift while waiting on pad
   //servoAnglex = 90;
   //servoAnglez = 90;
   accelSpeedy = 0;
 
-  if (accel.getAccelY_mss() >= 15) {
-    Serial.println("powered ascent");
-    lockGyro = false;
-    ledg(1);
-    ledr(1);
-    ledb(0);
-    addr = startAddr;
-    datalogging = true;
-    runMode = 1;
+  //  if (TVC.filteredAccelY() >= 20) { //accel.getAccelY_mss()
+  //    Serial.println("powered ascent");
+  //    lockGyro = false;
+  //    ledg(1);
+  //    ledr(1);
+  //    ledb(0);
+  //    addr = startAddr;
+  //    datalogging = true;
+  //    lastEvent = "launch detected!";
+  //    runMode = 1;
+  //  }
+  if (TVC.filteredAccelY() >= 11) {
+    static float olderMillis = millis();
+    if (olderMillis == 0) {
+      olderMillis = millis();
+    }
+    //if (millis() - olderMillis >= 100) {
+    if (TVC.filteredAccelY() >= 11) {
+      Serial.println("powered ascent");
+      lockGyro = false;
+      ledg(1);
+      ledr(1);
+      ledb(0);
+      addr = startAddr;
+      datalogging = true;
+      lastEvent = "launch detected";
+      runMode++;
+    }
+    //else {
+    olderMillis = 0;
+    //}
+    //}
   }
 }
 
@@ -1218,19 +1558,58 @@ void poweredAscent() {
   servox.write(servoAnglex());
   servoy.write(servoAnglez());
 
-  if (accel.getAccelY_mss() <= 4 ) {
-    servox.write(90);
-    servoy.write(90); //homes and locks servos
-    Serial.println("coasting");
-    oldMillis = currMillis;
-    ledr(1); //purple
-    ledb(1);
-    ledg(0);
-    runMode = 2;
+  if (groundTest == true) {
+    if (useProp == true) {
+      static float propOlderMillis = millis();
+      if (propOlderMillis == 0) {
+        propOlderMillis = millis();
+      }
+      if (millis() - propOlderMillis >= propBurnTime) {
+        prop.write(0);
+        lastEvent = "static test finished";
+        propOlderMillis = 0;
+        runMode = 4;
+      }
+    }
+  }
+
+  //  if (TVC.filteredAccelY() <= 2 ) {
+  //    servox.write(90);
+  //    servoy.write(90); //homes and locks servos
+  //    Serial.println("coasting");
+  //    lastEvent = "coasting";
+  //    oldMillis = currMillis;
+  //    ledr(1); //purple
+  //    ledb(1);
+  //    ledg(0);
+  //    runMode = 2;
+  //  }
+  if (accel.getAccelY_mss() <= 5) {
+    static float olderMillis = millis();
+    if (olderMillis == 0) {
+      olderMillis = millis();
+    }
+    if (millis() - olderMillis >= 100) {
+      if (accel.getAccelY_mss() <= 5) {
+        Serial.println("coasting");
+        servox.write(centrepointX);
+        servoy.write(centrepointY);
+        oldMillis = currMillis;
+        ledg(0);
+        ledr(1);
+        ledb(1);
+        lastEvent = "burnout";
+        runMode++;
+      }
+      else {
+        olderMillis = 0;
+      }
+    }
   }
 }
 
 void coast() {
+  prop.write(0);
   float altitude2 = alt();
   altcount += 1;
   //Serial.println(altcount);
@@ -1238,20 +1617,40 @@ void coast() {
   //if (altcount >=delayPeriod / 2)
   if ((vSpeed <= 0.0) or ((currMillis - oldMillis) >= (delayPeriod * 1000))) {  //(alt() <= (altitude2 - 0.5)
     Serial.println("descending");
+    lastEvent = "apogee detected!";
+    TVC.pyro1();
     oldMillis = currMillis;
     ledr(0);
     ledg(1);
     ledb(0);
-    runMode = 3;
+    runMode++;
   }
 }
 
 void descent() {
+  prop.write(0);
+  //TVC.pyro1();
+  static float olderMillis = millis();
+  static boolean pyro = false;
+  static boolean pyroFired = false;
   //File data = LittleFS.open("/data.txt", "a");
   //data.close();
   datalogInterval = 1000;
-  parachute.write(180);
-  digitalWrite(pyro1, HIGH); //pyro charge 1
+  //  if (pyroFired == false) {
+  //    if (pyro != true) {
+  //      parachute.write(180);
+  //      digitalWrite(pyro1, HIGH); //pyro charge 1
+  //      pyro = true;
+  //      olderMillis = millis();
+  //    }
+  //    if (pyro == true) {
+  //      if ((millis() - olderMillis) >= pyroTime) {
+  //        parachute.write(0);
+  //        digitalWrite(pyro1, LOW); //pyro charge 1 off
+  //        pyroFired = true;
+  //      }
+  //    }
+  //  }
   if ((gyro.getGyroX_rads() <= gyroThreshold) & (gyro.getGyroY_rads() <= gyroThreshold) & (gyro.getGyroZ_rads() <= gyroThreshold) & (gyro.getGyroX_rads() >= -gyroThreshold) & (gyro.getGyroY_rads() >= -gyroThreshold) & (gyro.getGyroZ_rads() >= -gyroThreshold)) {
     boolean setOldMillis5;
     int oldMillis5;
@@ -1261,18 +1660,64 @@ void descent() {
     //}
     //if ((currMillis - oldMillis5) >= 2000){
     Serial.println("landed!");
+    lastEvent = "landing detected!";
     datalogging = false;
     //SD.close();
     //EEPROM.commit();
-    runMode = 4;
+    runMode++;
     //}
   }
 }
 
 void landed() {
+  prop.write(0);
   ledr(0);
   ledb(0);
   datalogging = false;
+
+  if (SDAvailable == true) {
+    if (copyToFlash == true) {
+      File file = SD.open("datalog.txt", FILE_READ);
+      File flash = LittleFS.open("data.txt", "r");
+      flash.println();
+      flash.println();
+      flash.println();
+      flash.println();
+      flash.println();
+      flash.println("content from MicroSD card:");
+      flash.println();
+      flash.println();
+      flash.println();
+      flash.println();
+      flash.println();
+      while (file.available()) {
+        flash.write(file.read());
+      }
+      file.close();
+      flash.close();
+    }
+    if (copyToSD == true) {
+      File file = SD.open("datalog.txt", FILE_READ);
+      File flash = LittleFS.open("data.txt", "r");
+      file.println();
+      file.println();
+      file.println();
+      file.println();
+      file.println();
+      file.println("content from internal QSPI flash:");
+      file.println();
+      file.println();
+      file.println();
+      file.println();
+      file.println();
+      while (flash.available()) {
+        file.write(flash.read());
+      }
+      file.close();
+      flash.close();
+    }
+  }
+
   //  File data = LittleFS.open("/data.txt","r");
   //  File file = SD.open("datalog.txt", FILE_WRITE);
   //  if (SDAvailable){
@@ -1296,6 +1741,11 @@ void landed() {
   }
   //  file.close();
   //  data.close();
+}
+
+void gimbalTest() {
+  servox.write(servoAnglex());
+  servoy.write(servoAnglez());
 }
 
 //custom libraries
@@ -1360,19 +1810,19 @@ void dump() {
   }
 }
 
-//void SDDump() {
-//  int oldRunMode = runMode;
-//  File file = SD.open("datalog.txt", FILE_READ);
-//  if (file) {
-//    while (file.available()) {
-//      Serial.write(file.read());
-//    }
-//    file.close();
-//  }
-//  else {
-//    Serial.println("sd file error");
-//  }
-//}
+void SDDump() {
+  int oldRunMode = runMode;
+  File file = SD.open("datalog.txt", FILE_READ);
+  if (file) {
+    while (file.available()) {
+      Serial.write(file.read());
+    }
+    file.close();
+  }
+  else {
+    Serial.println("sd file error");
+  }
+}
 
 float alt() {
   EnvironmentCalculations::AltitudeUnit envAltUnit  =  EnvironmentCalculations::AltitudeUnit_Meters;
@@ -1396,12 +1846,21 @@ float alt() {
 //}
 
 float servoAnglex() {
+  const float imax = 1000; //maximum cumulative error for preventing I windup.
   static float olderMillis;
   float dt = millis() - olderMillis;
   static float prev_error;
   float error = targetAnglex - anglex;
   static float cumulative_error = 0.0;
   cumulative_error += error * dt;
+
+  if (cumulative_error >= imax) {
+    cumulative_error = imax;
+  }
+  if (cumulative_error <= -imax) {
+    cumulative_error = -imax;
+  }
+
   float pval = error * Kp;
   float ival = (cumulative_error * Ki) / 100;
 
@@ -1409,14 +1868,14 @@ float servoAnglex() {
     cumulative_error = 0;
   }
 
-  float dval = ((error - prev_error) / dt) * Kd;
-  float pidval = pval + ival + dval + centrepoint;
+  float dval = (((error - prev_error) / dt) * Kd) / 10;
+  float pidval = centrepointX - (pval + ival + dval);
 
-  if (pidval >= servoLimit + centrepoint) {
-    pidval = servoLimit + centrepoint;
+  if (pidval >= servoLimit + centrepointX) {
+    pidval = servoLimit + centrepointX;
   }
-  if (pidval <= -servoLimit + centrepoint) {
-    pidval = -servoLimit + centrepoint;
+  if (pidval <= -servoLimit + centrepointX) {
+    pidval = -servoLimit + centrepointX;
   }
 
   //  Serial.println(pval);
@@ -1430,12 +1889,21 @@ float servoAnglex() {
 }
 
 float servoAnglez() {
+  const float imax = 1000; //maximum cumulative error for preventing I windup.
   static float olderMillis;
   float dt = millis() - olderMillis;
   static float prev_error;
-  float error = targetAnglez - anglez;
+  float error = targetAnglez + anglez;
   static float cumulative_error = 0.0;
   cumulative_error += error * dt;
+
+  if (cumulative_error >= imax) {
+    cumulative_error = imax;
+  }
+  if (cumulative_error <= -imax) {
+    cumulative_error = -imax;
+  }
+
   float pval = error * Kp;
   float ival = (cumulative_error * Ki) / 100;
 
@@ -1443,14 +1911,14 @@ float servoAnglez() {
     cumulative_error = 0;
   }
 
-  float dval = ((error - prev_error) / dt) * Kd;
-  float pidval = pval + ival + dval + centrepoint;
+  float dval = (((error - prev_error) / dt) * Kd) / 10;
+  float pidval = centrepointY - (pval + ival + dval);
 
-  if (pidval >= servoLimit + centrepoint) {
-    pidval = servoLimit + centrepoint;
+  if (pidval >= servoLimit + centrepointY) {
+    pidval = servoLimit + centrepointY;
   }
-  if (pidval <= -servoLimit + centrepoint) {
-    pidval = -servoLimit + centrepoint;
+  if (pidval <= -servoLimit + centrepointY) {
+    pidval = -servoLimit + centrepointY;
   }
 
   prev_error = error;
@@ -1571,7 +2039,7 @@ void datalog() {
   else if (currMillis - oldMillis6 >= (datalogInterval / 2)) {
     if (statWrite == true) {
       //EEPROM.commit();
-      flashDatalog();
+      //flashDatalog();
       tone(9, 700, 200);
       ledr(1);
       //data.close();
@@ -1594,35 +2062,35 @@ void datalog() {
   //data.close();
 }
 
-void formatExternalFlash() {
-  FRESULT r = f_mkfs("", FM_FAT, 0, workbuf, sizeof(workbuf));
-  if (r != FR_OK) {
-    Serial.print("Error, f_mkfs failed with error code: "); Serial.println(r, DEC);
-    while (1) yield();
-  }
-  r = f_mount(&elmchamFatfs, "0:", 1);
-  if (r != FR_OK) {
-    Serial.print("Error, f_mount failed with error code: "); Serial.println(r, DEC);
-    while (1) yield();
-  }
-  // Setting label
-  Serial.println("Setting disk label to: " DISK_LABEL);
-  r = f_setlabel(DISK_LABEL);
-  if (r != FR_OK) {
-    Serial.print("Error, f_setlabel failed with error code: "); Serial.println(r, DEC);
-    while (1) yield();
-  }
-  // unmount
-  f_unmount("0:");
-  // sync to make sure all data is written to flash
-  spiflash.syncBlocks();
-  Serial.println("Formatted flash!");
-  if (!fatfs.begin(&spiflash)) {
-    Serial.println("Error, failed to mount newly formatted filesystem!");
-    while (1) delay(1);
-  }
-  Serial.println("Flash chip successfully formatted with new empty filesystem!");
-}
+//void formatExternalFlash() {
+//  FRESULT r = f_mkfs("", FM_FAT, 0, workbuf, sizeof(workbuf));
+//  if (r != FR_OK) {
+//    Serial.print("Error, f_mkfs failed with error code: "); Serial.println(r, DEC);
+//    while (1) yield();
+//  }
+//  r = f_mount(&elmchamFatfs, "0:", 1);
+//  if (r != FR_OK) {
+//    Serial.print("Error, f_mount failed with error code: "); Serial.println(r, DEC);
+//    while (1) yield();
+//  }
+//  // Setting label
+//  Serial.println("Setting disk label to: " DISK_LABEL);
+//  r = f_setlabel(DISK_LABEL);
+//  if (r != FR_OK) {
+//    Serial.print("Error, f_setlabel failed with error code: "); Serial.println(r, DEC);
+//    while (1) yield();
+//  }
+//  // unmount
+//  f_unmount("0:");
+//  // sync to make sure all data is written to flash
+//  spiflash.syncBlocks();
+//  Serial.println("Formatted flash!");
+//  if (!fatfs.begin(&spiflash)) {
+//    Serial.println("Error, failed to mount newly formatted filesystem!");
+//    while (1) delay(1);
+//  }
+//  Serial.println("Flash chip successfully formatted with new empty filesystem!");
+//}
 
 void wipe() { //for wiping the entire EEPROM
   while (addr <= EEPROM.length()) {
@@ -1864,72 +2332,72 @@ float smoothedAlt() {
 // fatfs diskio
 //--------------------------------------------------------------------+
 
-extern "C"
-{
-
-  DSTATUS disk_status ( BYTE pdrv )
-  {
-    (void) pdrv;
-    return 0;
-  }
-
-  DSTATUS disk_initialize ( BYTE pdrv )
-  {
-    (void) pdrv;
-    return 0;
-  }
-
-  DRESULT disk_read (
-    BYTE pdrv,    /* Physical drive nmuber to identify the drive */
-    BYTE *buff,   /* Data buffer to store read data */
-    DWORD sector, /* Start sector in LBA */
-    UINT count    /* Number of sectors to read */
-  )
-  {
-    (void) pdrv;
-    return spiflash.readBlocks(sector, buff, count) ? RES_OK : RES_ERROR;
-  }
-
-  DRESULT disk_write (
-    BYTE pdrv,      /* Physical drive nmuber to identify the drive */
-    const BYTE *buff, /* Data to be written */
-    DWORD sector,   /* Start sector in LBA */
-    UINT count      /* Number of sectors to write */
-  )
-  {
-    (void) pdrv;
-    return spiflash.writeBlocks(sector, buff, count) ? RES_OK : RES_ERROR;
-  }
-
-  DRESULT disk_ioctl (
-    BYTE pdrv,    /* Physical drive nmuber (0..) */
-    BYTE cmd,   /* Control code */
-    void *buff    /* Buffer to send/receive control data */
-  )
-  {
-    (void) pdrv;
-
-    switch ( cmd )
-    {
-      case CTRL_SYNC:
-        spiflash.syncBlocks();
-        return RES_OK;
-
-      case GET_SECTOR_COUNT:
-        *((DWORD*) buff) = spiflash.size() / 512;
-        return RES_OK;
-
-      case GET_SECTOR_SIZE:
-        *((WORD*) buff) = 512;
-        return RES_OK;
-
-      case GET_BLOCK_SIZE:
-        *((DWORD*) buff) = 8;    // erase block size in units of sector size
-        return RES_OK;
-
-      default:
-        return RES_PARERR;
-    }
-  }
-
-}
+//extern "C"
+//{
+//
+//  DSTATUS disk_status ( BYTE pdrv )
+//  {
+//    (void) pdrv;
+//    return 0;
+//  }
+//
+//  DSTATUS disk_initialize ( BYTE pdrv )
+//  {
+//    (void) pdrv;
+//    return 0;
+//  }
+//
+//  DRESULT disk_read (
+//    BYTE pdrv,    /* Physical drive nmuber to identify the drive */
+//    BYTE *buff,   /* Data buffer to store read data */
+//    DWORD sector, /* Start sector in LBA */
+//    UINT count    /* Number of sectors to read */
+//  )
+//  {
+//    (void) pdrv;
+//    return spiflash.readBlocks(sector, buff, count) ? RES_OK : RES_ERROR;
+//  }
+//
+//  DRESULT disk_write (
+//    BYTE pdrv,      /* Physical drive nmuber to identify the drive */
+//    const BYTE *buff, /* Data to be written */
+//    DWORD sector,   /* Start sector in LBA */
+//    UINT count      /* Number of sectors to write */
+//  )
+//  {
+//    (void) pdrv;
+//    return spiflash.writeBlocks(sector, buff, count) ? RES_OK : RES_ERROR;
+//  }
+//
+//  DRESULT disk_ioctl (
+//    BYTE pdrv,    /* Physical drive nmuber (0..) */
+//    BYTE cmd,   /* Control code */
+//    void *buff    /* Buffer to send/receive control data */
+//  )
+//  {
+//    (void) pdrv;
+//
+//    switch ( cmd )
+//    {
+//      case CTRL_SYNC:
+//        spiflash.syncBlocks();
+//        return RES_OK;
+//
+//      case GET_SECTOR_COUNT:
+//        *((DWORD*) buff) = spiflash.size() / 512;
+//        return RES_OK;
+//
+//      case GET_SECTOR_SIZE:
+//        *((WORD*) buff) = 512;
+//        return RES_OK;
+//
+//      case GET_BLOCK_SIZE:
+//        *((DWORD*) buff) = 8;    // erase block size in units of sector size
+//        return RES_OK;
+//
+//      default:
+//        return RES_PARERR;
+//    }
+//  }
+//
+//}
