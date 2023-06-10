@@ -15,6 +15,12 @@ class TVCClass {
     float roll();
     float yaw();
     float filteredAccelY();
+    float accelzSpeed();
+    float accelz();
+    float accelAlt();
+    //float baroVel();
+    //float smoothedAlt();
+    //float alt();
     void pyro1();
     void pyro2();
     void pyro3();
@@ -25,6 +31,7 @@ void ledr(int input);
 void ledg(int input);
 void ledb(int input);
 void exFlashSetup();
+void Mahony_update(float ax, float ay, float az, float gx, float gy, float gz, float deltat);
 
 typedef struct Telem{
   int currMillis;
