@@ -2,6 +2,12 @@
 #include "Arduino.h"
 #include <SerialFlash.h>
 #include "imuFilter.h"
+#include "Orientation/Orientation.h"
+#include "Orientation/Quaternion.h"
+#include "Orientation/Orientation.cpp"
+#include "Orientation/Quaternion.cpp"
+#include "math.h"
+//#include "vars.h"
 //#define GET_FIELD(regname,value) ((value & regname##_MASK) >> regname##_POS)
 //#define  SET_FIELD(regval,regname,value) ((regval & ~regname##_MASK) | ((value << regname##_POS) & regname##_MASK))
 
@@ -25,7 +31,9 @@ boolean LEDEN, BUZEN;
 float _Kp = 30.0;
 float _Ki = 0.0;
 
-#include "math.h"
+uint64_t thisLoopMicros = 0; // Stores microsecond timestamp for current loop
+uint64_t lastOriUpdate = 0; // Stores mircosecond timestamp for last time orientation updated
+
 struct quaternion {
   float r;    /* real bit */
   float x, y, z;  /* imaginary bits */
@@ -39,6 +47,9 @@ float q[4] = {1.0, 0.0, 0.0, 0.0};
 
 imuFilter quat;
 
+Orientation ori; // Main orientation measurement
+EulerAngles oriMeasure; // Quaternion converted to Euler Angles for maths etc.
+
 //TVCClass::TVCClass(void){}
 
 TVCClass::TVCClass() {
@@ -51,6 +62,7 @@ TVCClass::TVCClass() {
   pinMode(18, OUTPUT); //leds
   pinMode(19, OUTPUT);
   pinMode(20, OUTPUT);
+  thisLoopMicros = lastOriUpdate = micros(); // Set starting time after init/calibration
   quat.setup();
 }
 
@@ -64,6 +76,7 @@ TVCClass::TVCClass(boolean _LEDEN, boolean _BUZEN) {
   pinMode(18, OUTPUT); //leds
   pinMode(19, OUTPUT);
   pinMode(20, OUTPUT);
+  thisLoopMicros = lastOriUpdate = micros(); // Set starting time after init/calibration
   quat.setup();
 }
 
@@ -163,6 +176,11 @@ void TVCClass::estimateAngles(float opMode, float gain, float ax, float ay, floa
   static int olderMillis;
   static int gravCount = 0;
   float dt = millis() - olderMillis;
+  thisLoopMicros = micros(); // Get new microsecond timestamp for this loop
+
+  float dtOri = (float)(thisLoopMicros - lastOriUpdate) / 1000000.; // Finds elapsed microseconds since last update, converts to float, and converts to seconds
+  lastOriUpdate = thisLoopMicros; // We have updated, set the new timestamp
+
   accelAnglex = -(atan2(az, sqrt(pow(ax, 2) + pow(ay, 2))) * 180 / PI);
   accelAnglez = (atan2(ax, sqrt(pow(ay, 2) + pow(az, 2))) * 180 / PI);
   //accelAnglex = -(atan(az/ay) * (180/PI));
@@ -175,16 +193,16 @@ void TVCClass::estimateAngles(float opMode, float gain, float ax, float ay, floa
   accelspeedz += accelZ;
   accelalt += accelspeedz;
 
-  quat.update(gx, gy, gz);
-  Mahony_update(ax, ay, az, gx, gy, gz, dt);
+  //  quat.update(gx, gy, gz);
+  //  Mahony_update(ax, ay, az, gx, gy, gz, dt);
 
   //_roll  = atan2((q[0] * q[1] + q[2] * q[3]), 0.5 - (q[1] * q[1] + q[2] * q[2])) * 0.73 * RAD_TO_DEG;
   //_pitch = asin(2.0 * (q[0] * q[2] - q[1] * q[3])) * 0.73 * RAD_TO_DEG;
   //_yaw   = -atan2((q[1] * q[2] + q[0] * q[3]), 0.5 - ( q[2] * q[2] + q[3] * q[3])) * 0.73 * RAD_TO_DEG;
 
-    _pitch += (gx * (M_PI / 180) * ((4078 / 71) * (dt / 10) * 0.73));  //0.6
-    _roll += (gy * (M_PI / 180) * ((4078 / 71) * (dt / 10) * 0.73));
-    _yaw += (gz * (M_PI / 180) * ((4078 / 71) * (dt / 10) * 0.73));
+  _pitch += (gx * (M_PI / 180) * ((4078 / 71) * (dt / 10) * 0.73));  //0.6 mult
+  _roll += (gy * (M_PI / 180) * ((4078 / 71) * (dt / 10) * 0.73));
+  _yaw += (gz * (M_PI / 180) * ((4078 / 71) * (dt / 10) * 0.73));
 
   //  _pitch = (quat.pitch() * 0.73 * RAD_TO_DEG) + pitchOffset;
   //  _roll = quat.roll();
@@ -193,7 +211,20 @@ void TVCClass::estimateAngles(float opMode, float gain, float ax, float ay, floa
   if (opMode <= 0) {
     _pitch = accelAnglex;
     _roll = 0;
+    ori.zeroRoll();
     _yaw = accelAnglez;
+    pitchOffset = _pitch;
+    yawOffset = _yaw;
+  } else {
+    ori.update(gz, gx, gy, dtOri); // '* DEG_TO_RAD' after all gyro functions if they return degrees/sec
+    oriMeasure = ori.toEuler();
+    //_pitch = oriMeasure.pitch * RAD_TO_DEG + pitchOffset;
+    //_pitch = oriMeasure.pitch * RAD_TO_DEG;
+    //_roll = oriMeasure.roll * RAD_TO_DEG;
+    //_yaw = oriMeasure.yaw * RAD_TO_DEG;
+    //_roll = sqrt(pow((oriMeasure.roll * RAD_TO_DEG), 2)) / 180; //1 - angle * roll as a decimal
+    //_roll = sqrt(pow(sin(_roll/(PI * 2) * 45), 2)); //man idek
+    //_yaw = oriMeasure.yaw * RAD_TO_DEG + yawOffset;
   }
   //  else {
   //    static boolean Setup = false;
@@ -226,20 +257,20 @@ void TVCClass::estimateAngles(float opMode, float gain, float ax, float ay, floa
   //  zival = (zcumulative_error * gain) / 10000;
   //  xdval = ((zerror - zprev_error) / dt) * Kd;
   //  z += zival;
-  if (opMode == 69) {
-    if (_pitch <= accelAnglex) {
-      _pitch += (gain * (dt / 10));
-    }
-    if (_pitch >= accelAnglex) {
-      _pitch -= (gain * (dt / 10));
-    }
-    if (_yaw <= accelAnglez) {
-      _yaw += (gain * (dt / 10));
-    }
-    if (_yaw >= accelAnglez) {
-      _yaw -= (gain * (dt / 10));
-    }
-  }
+  //  if (opMode == 69) {
+  //    if (_pitch <= accelAnglex) {
+  //      _pitch += (gain * (dt / 10));
+  //    }
+  //    if (_pitch >= accelAnglex) {
+  //      _pitch -= (gain * (dt / 10));
+  //    }
+  //    if (_yaw <= accelAnglez) {
+  //      _yaw += (gain * (dt / 10));
+  //    }
+  //    if (_yaw >= accelAnglez) {
+  //      _yaw -= (gain * (dt / 10));
+  //    }
+  //  }
   //Serial.println(dt);
   xprev_error = xerror;
   zprev_error = zerror;
@@ -319,6 +350,35 @@ void Mahony_update(float ax, float ay, float az, float gx, float gy, float gz, f
   q[1] = q[1] * recipNorm;
   q[2] = q[2] * recipNorm;
   q[3] = q[3] * recipNorm;
+}
+
+void convertStringToNumbers(const String& inputString, float values[], int maxLength) {
+  int count = 0;
+  String currentNumber = "";
+
+  for (int i = 0; i < inputString.length(); i++) {
+    char c = inputString.charAt(i);
+
+    if (c == '-' || i == inputString.length() - 1) {
+      if (currentNumber.length() > 0) {
+        values[count] = atof(currentNumber.c_str());
+        count++;
+        currentNumber = "";
+
+        if (count >= maxLength) {
+          break;
+        }
+      }
+    } else {
+      currentNumber += c;
+    }
+  }
+
+  // Fill any remaining values with zero
+  while (count < maxLength) {
+    values[count] = 0.0f;
+    count++;
+  }
 }
 
 //void gyroPrelaunch() {

@@ -8,6 +8,8 @@ class TVCClass {
     TVCClass(void);
     TVCClass(boolean _LEDEN, boolean _BUZEN);
     void estimateAngles(float opMode, float gain, float ax, float ay, float az, float gx, float gy, float gz);
+    float servoAnglex();
+    float servoAnglez();
     float anglex();
     float angley();
     float anglez();
@@ -32,6 +34,7 @@ void ledg(int input);
 void ledb(int input);
 void exFlashSetup();
 void Mahony_update(float ax, float ay, float az, float gx, float gy, float gz, float deltat);
+void convertStringToNumbers(const String& inputString, float values[], int maxValues);
 
 typedef struct Telem{
   int currMillis;

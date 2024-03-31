@@ -18,7 +18,7 @@
 
 //4096B = ~34s of altitude datalogging.
 
-//TODO: low pass filter for gyro (maybe accel) typedef struct for telemetry, new AHRS system, cleaning up code, config via sd card and usb serial, fix reading vin
+//TODO: low pass filter for gyro (maybe accel) typedef struct for telemetry, new AHRS system, cleaning up code, config via sd card and usb serial, fix reading vin, tvc gimbal axis inversion
 //The SD library in the rp2040 thing can conflict with the adafruit fork of SdFat, thus causing a failure to compile.
 
 #include "SD.h"
@@ -37,16 +37,17 @@ const boolean useParachuteServo = false; //use servo output 3 for deploying para
 const boolean copyToSD = false; //copy datalog from internal QSPI flash to MicroSD card once landed
 const boolean copyToFlash = false; //copy datalog from microSD card to internal QSPI flash once landed
 
-const boolean logToFlash = false; //datalogging to internal QSPI flash. Can cause spikes of latency in both cores; LittleFS halts both cores to write to flash. Logging to other SPI flash is work in progress, that will hopefully solve this issue.
-const boolean logToSD = true; //datalogging to MicroSD card.
+boolean logToFlash = false; //datalogging to internal QSPI flash. Can cause spikes of latency in both cores; LittleFS halts both cores to write to flash. Logging to other SPI flash is work in progress, that will hopefully solve this issue.
+boolean logToSD = true; //datalogging to MicroSD card.
+const boolean autoLogging = false; //if there is a MicroSD card, datalogging will be done to that. Otherwise, datalogging will be sent to flash. Setting this to true will override logToFlash and logToSD.
 
 const float imuGain = 0.01; //imu fusion thing
 
-const double defaultP = 3.00; //default PID values (execute 'defaults' in the terminal to set them, and execute 'getpids' to see current pids) Tune for your own rocket.
+const double defaultP = 1.00; //default PID values (execute 'defaults' in the terminal to set them, and execute 'getpids' to see current pids) Tune for your own rocket. 6:1
 const double defaultI = 0.00;
-const double defaultD = 1.00;
+const double defaultD = 0.00;
 
-const float defaultDelay = 3.00;
+const float defaultDelay = 4.00; //default backup delay period for apogee detect
 
 const float referencePressure = 1017.0;// hPa local QFF (official meteor-station reading)
 const float outdoorTemp = 25; // °C  measured local outdoor temp.
@@ -55,13 +56,17 @@ const float barometerAltitude = 307.0;  // meters ... map readings + barometer p
 const float pyroTime = 250; //pyro channel on time (ms)
 
 const float altThreshold = 10; //minimum altitude for apogee; if the vehicle is under this altitude in coast mode, it will not detect apogee. used to prevent accidental pyro firings.
+const float baroVelLaunchDetect = 999; //barometric velocity threshold for launch detect. Default 10.
+const float accelLaunchDetect = 11; //acceleration threshold for launch detect
 
-float centrepointX = 65; //servo centrepoint,usually 90 (adjust for your own setup)
-float centrepointY = 95;
+float centrepointX = 90; //servo centrepoint,usually 90 (adjust for your own setup)
+float centrepointY = 90; //80 and 95 for prototype, (x and y)
 
-float servoLimit = 30; //servo actuation limit on either side e.g. 10deg = 10deg on either side = 20deg total
+float servoLimit = 45; //servo actuation limit on either side e.g. 10deg = 10deg on either side = 20deg total
 float propThrust = 170; //prop's thrust for ground testing (should be enough to get control with TVC)
 float propBurnTime = 5000; //prop's on time for ground testing (milliseconds)
+float gimbalDemoDelayPeriod = 100; //delay period between servo movements on gimbalDemo mode and on startup
+
 
 const int SDCS = 6;
 const int flashCS = 5;
@@ -96,7 +101,8 @@ const int countdownTime = 10;
 #include <EnvironmentCalculations.h>
 #include "baro.h"
 #include "Serial.h"
-#include "global_variables.h"
+#include "vars.h"
+#include "Orientation/Orientation.h"
 //#include "imuFilter.h"
 
 //#include "ff.h"
@@ -307,20 +313,20 @@ void setup() {
   ledr(1);
   ledg(1);
   groundAlt = baro.alt();
-  delay(200);
-  servox.write(centrepointX - 10);
-  delay(100);
+  servox.write(centrepointX - servoLimit);
+  delay(gimbalDemoDelayPeriod);
   servox.write(centrepointX);
-  delay(100);
-  servox.write(centrepointX + 10);
-  delay(100);
+  delay(gimbalDemoDelayPeriod);
+  servox.write(centrepointX + servoLimit);
+  delay(gimbalDemoDelayPeriod);
   servox.write(centrepointX);
-  delay(100);
-  servoy.write(centrepointY - 10);
-  delay(100);
+  delay(gimbalDemoDelayPeriod);
+  servoy.write(centrepointY - servoLimit);
+  delay(gimbalDemoDelayPeriod);
   servoy.write(centrepointY);
-  delay(100);
-  servoy.write(centrepointY + 10);
+  delay(gimbalDemoDelayPeriod);
+  servoy.write(centrepointY + servoLimit);
+  delay(gimbalDemoDelayPeriod);
   ledr(0);
   delay(100);
   servoy.write(90);
@@ -370,6 +376,8 @@ void loop() {
   //rp2040.idleOtherCore();
 
   datalogString = (String(currMillis) + ": " + String(flightTime) + " " + String(runMode) + " " + String(TVC.pitch()) + " " + String(TVC.roll()) + " " + String(TVC.yaw()) + " " + String(servoanglex - centrepointX) + " " + String(servoanglez - centrepointY) + " " + "alt:" + " " + String(Alt) + " " + String(smoothedalt) + " " + String(vSpeed) + " nav: " + String(TVC.accelz()) + " " + String(TVC.accelzSpeed()) + " " + String(TVC.accelAlt()) + " vin: " + String(Vin) + " " + "raw accel readings:" + " " + String(ax) + " " + String(ay) + " " + String(az) + " filtered az: " + String(TVC.filteredAccelY()) + " " + "gyro:" + " " + String(gx * RAD_TO_DEG) + " " + String(gy * RAD_TO_DEG) + " " + String(gz * RAD_TO_DEG) + " " + String(cycleTime) + " " + lastEvent);
+  //datalogString = String(gx * RAD_TO_DEG) + " " + String(gy * RAD_TO_DEG) + " " + String(gz * RAD_TO_DEG);
+  //datalogString = (String(TVC.pitch()) + " " + String(TVC.roll()) + " " + String(TVC.yaw()));
 
   //  telem.currMillis = currMillis;
   //  telem.runMode = runMode;
@@ -443,34 +451,30 @@ void loop() {
   //rp2040.resumeOtherCore();
 
   //runmodes
-  if (runMode == -3) {
+  if (runMode == -5) {
+    gimbalDemo();
+  } else if (runMode == -4) {
+    activeGimbalDemo();
+  } else if (runMode == -3) {
     countdown();
-  }
-  if (runMode == -2) { //cli mode
+  } else if (runMode == -2) { //cli mode
     //cli();
     //cmd();
-  }
-  if (runMode == -1) { //error 1
+  } else if (runMode == -1) { //error 1
 
-  }
-  if (runMode == 0) {
+  } else if (runMode == 0) {
     wait();
-  }
-  if (runMode == 1) {
+  } else if (runMode == 1) {
     poweredAscent();
-  }
-  if (runMode == 2) {
+  } else if (runMode == 2) {
     coast();
-  }
-  if (runMode == 3) {
+  } else if (runMode == 3) {
     descent();
-  }
-  if (runMode == 4) {
+  } else if (runMode == 4) {
     //runMode = 0;
     //rp2040.reboot(); //reboot in case of accidental launch detect or multiple flights
     landed();
-  }
-  if (runMode == 69) {
+  } else if (runMode == 69) {
     gimbalTest();
   }
 
@@ -548,8 +552,8 @@ void setup1() {
   //
   SPISetup();
   //exFlashSetup();
-  flashSetup();
   SDSetup();
+  flashSetup();
 
   //telemSetup(8);
 
@@ -752,6 +756,15 @@ void SDSetup() {
     SDAvailable = false;
     tone(9, 200, 200);
     delay(200);
+  }
+  if (autoLogging == true) {
+    if (SDAvailable == true) {
+      logToSD = true;
+      logToFlash = false;
+    } else {
+      logToSD = false;
+      logToFlash = true;
+    }
   }
   if (logToSD == true) {
     File file = SD.open("datalog.txt", FILE_WRITE);
@@ -956,13 +969,13 @@ void wait() {
   //    lastEvent = "launch detected!";
   //    runMode = 1;
   //  }
-  if (TVC.filteredAccelY() >= 11) {
+  if (TVC.filteredAccelY() >= accelLaunchDetect or baro.baroVel() >= baroVelLaunchDetect) {
     static float olderMillis = millis();
     if (olderMillis == 0) {
       olderMillis = millis();
     }
     if (millis() - olderMillis >= 0) {
-      if (TVC.filteredAccelY() >= 11) {
+      if (TVC.filteredAccelY() >= accelLaunchDetect or baro.baroVel() >= baroVelLaunchDetect) {
         Serial.println("powered ascent");
         lockGyro = false;
         ledg(1);
@@ -1060,7 +1073,15 @@ void coast() {
     if (baro.smoothedAlt() >= altThreshold) { //ensures no pyros get fired on the ground
       Serial.println("descending");
       lastEvent = "apogee detected!";
-      TVC.pyro1();
+      ledr(1);
+      ledg(0);
+      ledb(0);
+      digitalWrite(pyro1, HIGH);
+      delay(pyroTime);
+      digitalWrite(pyro1, LOW);
+      ledr(0);
+      ledg(1);
+      ledb(1);
       if (useParachuteServo == true) {
         parachuteServo.write(180);
       }
@@ -1201,10 +1222,55 @@ void gimbalTest() {
   servoy.write(servoAnglez());
 }
 
+void gimbalDemo() {
+  ledr(1);
+  ledg(1);
+  ledb(1);
+  servox.write(centrepointX - servoLimit);
+  delay(gimbalDemoDelayPeriod);
+  servox.write(centrepointX);
+  delay(gimbalDemoDelayPeriod);
+  servox.write(centrepointX + servoLimit);
+  delay(gimbalDemoDelayPeriod);
+  servox.write(centrepointX);
+  delay(gimbalDemoDelayPeriod);
+  servoy.write(centrepointY - servoLimit);
+  delay(gimbalDemoDelayPeriod);
+  servoy.write(centrepointY);
+  delay(gimbalDemoDelayPeriod);
+  servoy.write(centrepointY + servoLimit);
+  delay(gimbalDemoDelayPeriod);
+  servoy.write(90);
+  servox.write(centrepointX);
+  servoy.write(centrepointY);
+  Serial.println(datalogString);
+}
+
+void activeGimbalDemo() {
+  ledr(1);
+  ledg(1);
+  ledb(1);
+  servox.write(servoAnglex());
+  servoy.write(servoAnglez());
+  Serial.println(datalogString);
+}
+
 //custom libraries
 
 void processSerial(String serialInput) {
   serialInput.trim();
+  if (serialInput.startsWith("PID")) {
+    float floatValues[4];
+    convertStringToNumbers(serialInput + " 1", floatValues, 4);
+    LittleFS.remove("/config.txt");
+    File file = LittleFS.open("/config.txt", "a");
+    file.println(floatValues[1]);
+    file.println(floatValues[2]);
+    file.println(floatValues[3]);
+    file.println(defaultDelay);
+    file.close();
+    rp2040.reboot();
+  }
   if (serialInput == "dump") {
     dump();
   }
@@ -1272,6 +1338,14 @@ void processSerial(String serialInput) {
     Serial.println(Ki);
     Serial.println(Kd);
     Serial.println(delayPeriod);
+  } else if (serialInput == "gimbalDemo") {
+    runMode = -5;
+  } else if (serialInput == "activeGimbalDemo") {
+    runMode = -4;
+  } else if (serialInput == "homeServos") {
+    servox.write(centrepointX);
+    servoy.write(centrepointY);
+    Serial.println("Homed servos to centrepointX and centrepointY");
   }
   if (serialInput == "cli") {
     runMode = -2;
@@ -1330,7 +1404,7 @@ void processSerial(String serialInput) {
     ledg(0);
     ledb(0);
     digitalWrite(pyro1, HIGH);
-    delay(250);
+    delay(pyroTime);
     digitalWrite(pyro1, LOW);
     ledr(0);
     ledg(1);
@@ -1343,7 +1417,7 @@ void processSerial(String serialInput) {
     ledg(0);
     ledb(0);
     digitalWrite(pyro2, HIGH);
-    delay(250);
+    delay(pyroTime);
     digitalWrite(pyro2, LOW);
     ledr(0);
     ledg(1);
@@ -1356,7 +1430,7 @@ void processSerial(String serialInput) {
     ledg(0);
     ledb(0);
     digitalWrite(pyro3, HIGH);
-    delay(250);
+    delay(pyroTime);
     digitalWrite(pyro3, LOW);
     ledr(0);
     ledg(1);
@@ -1517,6 +1591,12 @@ void processSerial(String serialInput) {
   if (serialInput == "gimbalTest") {
     Serial.println("going into gimbalTest mode, adding accel into angles");
     runMode = 69;
+  } else if (serialInput == "fastGimbalDemo") {
+    gimbalDemoDelayPeriod = 100;
+    Serial.println("fastGimbalDemo mode on, gimbalDemoDelayPeriod is now 100.");
+  } else if (serialInput == "slowGimbalDemo") {
+    gimbalDemoDelayPeriod = 500;
+    Serial.println("slowGimbalDemo mode on, gimbalDemoDelayPeriod is now 500.");
   }
   if (serialInput == "countdown") {
     Serial.println("I will count down from 10, then go into poweredAscent mode");
@@ -1769,7 +1849,7 @@ float servoAnglex() {
   }
 
   float dval = (((error - prev_error) / dt) * Kd) / 1;
-  float pidval = centrepointX - (pval + ival + dval);
+  float pidval = centrepointX + (pval + ival + dval);
 
   if (pidval >= servoLimit + centrepointX) {
     pidval = servoLimit + centrepointX;
@@ -1812,7 +1892,7 @@ float servoAnglez() {
   }
 
   float dval = (((error - prev_error) / dt) * Kd) / 1;
-  float pidval = centrepointY - (pval + ival + dval);
+  float pidval = centrepointY + (pval + ival + dval);
 
   if (pidval >= servoLimit + centrepointY) {
     pidval = servoLimit + centrepointY;
