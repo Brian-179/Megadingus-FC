@@ -5,16 +5,20 @@ const char* htmlContent = R"=====(
   <html>
   <head>
   <style>
-  body { background-color: #f2f2f2; text-align: center; }
+  body { background-color: #f2f2f2; text-align: center; font-family: Arial, sans-serif;}
   h1 { color: #333; }
-  input[type='text'] { padding: 10px; font-size: 16px; }
-  input[type='submit'] { padding: 10px 20px; font-size: 16px; background-color: #4CAF50; color: white; border: none; cursor: pointer; }
-  button[type='button'] { padding: 10px 20px; font-size: 16px; background-color: #4CAF50; color: white; border: none; cursor: pointer; }
+  input[type='text'] { padding: 10px; font-size: 16px; border: none; border-radius: 4px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);}
+  input[type='submit'] { padding: 10px 20px; font-size: 16px; background-color: #4CAF50; color: white; border: none; cursor: pointer; border: none; border-radius: 4px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);}
+  button[type='button'] { padding: 10px 20px; font-size: 16px; background-color: #4CAF50; color: white; border: none; cursor: pointer; border: none; border-radius: 4px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);}
+  button[type='button']:hover,
+  input[type='submit']:hover {
+  background-color: #45a049;
+  }
   </style>
   </head>
   <body>
   <h1>Welcome to the FC2.1 WiFi terminal!</h1>
-  <form method='get'> //<form method='post' action='/process_input'>
+  <form method='get'> <!-- <form method='post' action='/process_input'> -->
   Input: <input type='text' name='user_input'><br><br>
   <input type='submit' value='Submit'>
   <h1> </h1>
@@ -33,8 +37,21 @@ const char* htmlContent = R"=====(
   <h1> </h1>
   <button type='button' onclick='parachuteServo180()'>Actuate parachute servo to 180</button>
   <button type='button' onclick='parachuteServo0()'>Home parachute servo</button>
+  <h1> </h1>
+  <div id="runMode"></div>
+  <!-- <div id="serialData"></div> -->
   </form>
   <script>
+  function runMode(){
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET','/runMode');
+    xhr.onreadystatechange = function() {
+      if (xhr.readyState === 4 && xhr.status === 200) {
+        document.getElementById("runMode").innerHTML = xhr.responseText;
+      }
+    };
+    xhr.send();
+  }
   function servox(){
     var xhr = new XMLHttpRequest();
     xhr.open('GET', '/servox', true);
@@ -95,6 +112,21 @@ const char* htmlContent = R"=====(
     xhr.open('GET', '/rebootESP', true);
     xhr.send();
   }
+  function updateSerialData() {
+    var serialDataElement = document.getElementById("serialData");
+    var xhr = new XMLHttpRequest();
+
+    xhr.onreadystatechange = function () {
+      if (xhr.readyState === 4 && xhr.status === 200) {
+        var serialData = xhr.responseText;
+        serialDataElement.innerHTML = serialData;
+      }
+    };
+
+    xhr.open("GET", "/getSerialData", true);
+    xhr.send();
+  }
+  setInterval(updateSerialData, 1000); // Update every 1 second
   function isMobileDevice() {
     return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
   }

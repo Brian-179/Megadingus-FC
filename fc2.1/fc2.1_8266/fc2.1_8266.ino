@@ -32,8 +32,9 @@ void setup() {
   Serial.begin(115200);
   SPISlave.begin();
   // Connect to Wi-Fi network
-  WiFi.mode(WIFI_AP);
+  WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(ssid, password);
+  WiFi.setOutputPower(20.5);
 
   WiFi.hostname(hostname);
   if (!MDNS.begin(hostname)) {
@@ -51,6 +52,12 @@ void setup() {
 }
 
 void loop() {
+
+  if (Serial.available()) {
+    userInput = Serial.readString();
+    userInput.trim();
+  }
+
   WiFiClient client = server.available();
 
   if (client) {
@@ -165,6 +172,7 @@ void handleRequest(WiFiClient client, const String& request) {
   // Send the HTTP response header
   client.println("HTTP/1.1 200 OK");
   client.println("Content-Type: text/html");
+  //client.println("Refresh: 1\r\n"); //refresh every 1 second
   client.println();
 
   // Send the HTML content with the input form
@@ -178,52 +186,44 @@ void handleRequest(WiFiClient client, const String& request) {
 
   client.print(htmlContent);
 
+  if (request.indexOf("/getSerialData") != -1) {
+    client.println(userInput);
+  }
   if (request.indexOf("/servox") != -1) {
     userInput = "servox";
-    SPISlave.setData("servox");
   }
   if (request.indexOf("/servoy") != -1) {
     userInput = "servoy";
-    SPISlave.setData("servoy");
   }
   if (request.indexOf("/parachuteServo180") != -1) {
     userInput = "parachuteServo180";
-    SPISlave.setData("parachuteServo180");
   }
   if (request.indexOf("/parachuteServo0") != -1) {
     userInput = "parachuteServo0";
-    SPISlave.setData("parachuteServo0");
   }
   if (request.indexOf("/pyro1") != -1) {
     userInput = "pyro1";
-    SPISlave.setData("pyro1");
   }
   if (request.indexOf("/pyro2") != -1) {
     userInput = "pyro2";
-    SPISlave.setData("pyro2");
   }
   if (request.indexOf("/pyro3") != -1) {
     userInput = "pyro3";
-    SPISlave.setData("pyro3");
   }
   if (request.indexOf("/wipeFlash") != -1) {
     userInput = "wipeFlash";
-    SPISlave.setData("wipeFlash");
   }
   if (request.indexOf("/reboot") != -1) {
     userInput = "reboot";
-    SPISlave.setData("reboot");
   }
   if (request.indexOf("/rebootESP") != -1) {
     ESP.restart();
   }
   if (request.indexOf("/countdown") != -1) {
     userInput = "countdown";
-    SPISlave.setData("countdown");
   }
   if (request.indexOf("/wipeSD") != -1) {
     userInput = "wipeSD";
-    SPISlave.setData("wipeSD");
   }
 
   delay(10);
